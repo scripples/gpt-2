@@ -264,7 +264,7 @@ class TokenSampler(object):
     else:
       return self.sample_unsafe(length=length, max_attempts=max_attempts)
 
-import parmap
+import multiprocessing as mp
 import encoder
 
 _enc = None
@@ -276,10 +276,40 @@ def get_encoder():
   _enc = encoder.get_encoder('117M')
   return _enc
 
-def _tokenize(i, line):
+def _tokenize(line):
   enc = get_encoder()
   tokens = enc.encode(line) if isinstance(line, str) else line
-  return i, tokens
+  return tokens
+
+def _process(fp, verbose=True, **kws):
+  start = time.time()
+  total = 0
+  lines = []
+  elapsed = 0.0
+  for i, line in tflex_utils.for_each_line(fp, verbose=verbose, **kws):
+    lines.append(line)
+    if i % 1024 == 0:
+      lines = []
+      start = time.time()
+      chunks = list(_deliver(lines, verbose=verbose))
+      elapsed += time.time() - start
+      for tokens in chunks:
+        total += len(tokens)
+        yield tokens
+      if verbose and elapsed > 3.0:
+        sys.stderr.write('%d tokens in %.4fs (%.4f tokens/sec)\n' % (total, elapsed, total/elapsed))
+        total = 0
+        elapsed = 0.0
+  for tokens in _deliver(lines, verbose=verbose):
+    yield tokens
+  if verbose:
+    sys.stderr.write('%d tokens in %.4fs (%.4f tokens/sec)\n' % (total, elapsed, total/elapsed))
+
+def _deliver(lines, verbose=True):
+  for tokens in parmap.starmap(_tokenize, lines, pm_pbar=verbose):
+    #for tokens in map(_tokenize, lines):
+    #import pdb; pdb.set_trace()
+    yield tokens
 
 class TokenStreamer(object):
   def __init__(self, fp, enc, use_locking=False):
@@ -291,15 +321,30 @@ class TokenStreamer(object):
     try:
       if self.lock:
         self.lock.acquire()
+      #yield from _process(self.fp, verbose=verbose)
       start = time.time()
+      elapsed = 0.0
+      elapsed_ = 0.0
+      tick = start + 3.0
       total = 0
-      lines = list(tflex_utils.for_each_line(self.fp, verbose=verbose, **kws))
-      for i, tokens in parmap.starmap(_tokenize, lines, pm_pbar=True):
-        yield tokens
-        total += len(tokens)
-        if i % step == 0 and verbose:
-          elapsed = time.time() - start
-          sys.stderr.write('%d tokens in %.4fs (%.4f tokens/sec)\n' % (total, elapsed, total/elapsed))
+      total_ = 0
+      lines = []
+      with mp.Pool() as pool:
+        for i, lines in tflex_utils.for_each_lines(self.fp, verbose=verbose, **kws, count=1000):
+          now = time.time()
+          chunks = pool.map(_tokenize, lines)
+          cur = time.time()
+          elapsed += cur - now
+          elapsed_ += cur - now
+          if verbose and cur >= tick:
+            sys.stderr.write('{:,} tokens in {:,.2f}s ({:,.2f} tokens/sec)\n'.format(total, elapsed, total_/elapsed_))
+            total_ = 0
+            elapsed_ = 0
+            tick = cur + 3.0
+          for tokens in chunks:
+            yield tokens
+            total += len(tokens)
+            total_ += len(tokens)
     finally:
       if self.lock:
         self.lock.release()

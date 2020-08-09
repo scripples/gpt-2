@@ -73,6 +73,16 @@ def count_lines(f, verbose=True, ignore_errors=True):
     f.seek(0)
     return n
 
+def for_each_lines(f, total=None, verbose=True, ignore_errors=True, message=None, count=100):
+  lines = []
+  for i, line in for_each_line(f, total=total, verbose=verbose, ignore_errors=ignore_errors, message=message):
+    lines.append(line)
+    if len(lines) >= count:
+      yield i - len(lines), lines
+      lines = []
+  if len(lines) > 0:
+    yield i - len(lines), lines
+
 def for_each_line(f, total=None, verbose=True, ignore_errors=True, message=None):
     if isinstance(f, str):
       with try_open(f) as infile:
