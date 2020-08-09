@@ -293,8 +293,8 @@ class TokenStreamer(object):
         self.lock.acquire()
       start = time.time()
       total = 0
-      lines = tflex_utils.for_each_line(self.fp, verbose=verbose, **kws)
-      for i, tokens in parmap.starmap(_tokenize, lines):
+      lines = list(tflex_utils.for_each_line(self.fp, verbose=verbose, **kws))
+      for i, tokens in parmap.starmap(_tokenize, lines, pm_pbar=True):
         yield tokens
         total += len(tokens)
         if i % step == 0 and verbose:
