@@ -264,6 +264,23 @@ class TokenSampler(object):
     else:
       return self.sample_unsafe(length=length, max_attempts=max_attempts)
 
+import parmap
+import encoder
+
+_enc = None
+
+def get_encoder():
+  global _enc
+  if _enc is not None:
+    return _enc
+  _enc = encoder.get_encoder('117M')
+  return _enc
+
+def _tokenize(i, line):
+  enc = get_encoder()
+  tokens = enc.encode(line) if isinstance(line, str) else line
+  return i, tokens
+
 class TokenStreamer(object):
   def __init__(self, fp, enc, use_locking=False):
     self.fp = fp
@@ -276,9 +293,8 @@ class TokenStreamer(object):
         self.lock.acquire()
       start = time.time()
       total = 0
-      for i, line in tflex_utils.for_each_line(self.fp, verbose=verbose, **kws):
-        #import pdb; pdb.set_trace()
-        tokens = self.enc.encode(line) if isinstance(line, str) else line
+      lines = tflex_utils.for_each_line(self.fp, verbose=verbose, **kws)
+      for i, tokens in parmap.starmap(_tokenize, lines):
         yield tokens
         total += len(tokens)
         if i % step == 0 and verbose:
