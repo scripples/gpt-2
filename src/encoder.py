@@ -52,6 +52,9 @@ class Encoder:
         # Should haved added re.IGNORECASE so BPE merges can happen for capitalized versions of contractions
         self.pat = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
 
+        if '<|endoftext|>' not in self.encoder:
+            raise ValueError("Could not determine <|endoftext|> token in encoder file {!r}".format(vocab_path))
+
     def bpe(self, token):
         if token in self.cache:
             return self.cache[token]
@@ -96,10 +99,17 @@ class Encoder:
         return word
 
     def encode(self, text):
+        parts = text.split('<|endoftext|>')
+        mid = None
         bpe_tokens = []
-        for token in re.findall(self.pat, text):
-            token = ''.join(self.byte_encoder[b] for b in token.encode('utf-8'))
-            bpe_tokens.extend(self.encoder[bpe_token] for bpe_token in self.bpe(token).split(' '))
+        for part in parts:
+            if mid is not None:
+                bpe_tokens.append(mid)
+            else:
+                mid = self.encoder['<|endoftext|>']
+            for token in re.findall(self.pat, part):
+                token = ''.join(self.byte_encoder[b] for b in token.encode('utf-8'))
+                bpe_tokens.extend(self.encoder[bpe_token] for bpe_token in self.bpe(token).split(' '))
         return bpe_tokens
 
     def decode(self, tokens):
@@ -147,6 +157,10 @@ class HighSpeedTokenizer(object):
         pad_token
       )
     self.tokenizer = tokenizer
+    with open(vocab_path) as f:
+      self.encoder = json.load(f)
+    if '<|endoftext|>' not in self.encoder:
+      raise ValueError('Could not determine <|endoftext|> token in encoder file {!r}'.format(vocab_path))
 
   def encode(self, text):
     tokens = []
@@ -156,8 +170,16 @@ class HighSpeedTokenizer(object):
     for i, line in enumerate(lines):
       if i >= n:
         c = ''
-      encoding = self.tokenizer.encode(line + c)
-      tokens.extend(encoding.ids)
+      parts = line.split('<|endoftext|>')
+      parts[-1] += c
+      mid = None
+      for part in parts:
+        if mid is not None:
+          tokens.append(mid)
+        else:
+          mid = self.encoder['<|endoftext|>']
+        encoding = self.tokenizer.encode(part)
+        tokens.extend(encoding.ids)
     if text.endswith('\n'):
       tokens.extend(self.tokenizer.encode('\n').ids)
     return tokens
