@@ -53,7 +53,7 @@ class Encoder:
         self.pat = re.compile(r"""'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
 
         if '<|endoftext|>' not in self.encoder:
-            raise ValueError("Could not determine <|endoftext|> token in encoder file {!r}".format(vocab_path))
+            raise ValueError("Could not determine <|endoftext|> token in encoder file")
 
     def bpe(self, token):
         if token in self.cache:
