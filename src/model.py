@@ -413,6 +413,15 @@ def attn_parallel(x, scope, n_state, *, past, hparams, batch_size, seq_length):
         return a3, present
 
 
+def col_parallel(h, dtype, scope, input_size, output_size):
+  world_size = get_model_parallel_world_size()
+  ensure_divisibility(output_size, world_size)
+  output_size //= world_size
+  w, b = init_weight_bias_parallel(dtype, scope, input_size, output_size, axis=-1, use_bias=True)
+  h0 = [tf.matmul(h, w, name='h2__slice__%d_of_%d' % (i, world_size)) + b for i, h, w, b in zip(range(world_size), h, w, b)]
+  return h0
+
+
 def row_parallel(h, dtype, scope, input_size, output_size):
   world_size = get_model_parallel_world_size()
   ensure_divisibility(input_size, world_size)
@@ -437,11 +446,18 @@ def mlp_parallel(x, scope, n_state, *, hparams):
         nx = x.shape[-1].value
         ensure_divisibility(n_state, world_size)
         ensure_divisibility(nx, world_size)
+
         #x0 = clone_tensor_to_each_device(x)
+
         x0 = [x for _ in range(world_size)]
-        w0, b0 = init_weight_bias_parallel(dtype, 'c_fc', nx, n_state // world_size, axis=-1, use_bias=True)
-        h0 = [tf.matmul(x, w, name='h0__slice__%d_of_%d' % (i, world_size)) + b for i, x, w, b in zip(range(world_size), x0, w0, b0)]
+
+        # w0, b0 = init_weight_bias_parallel(dtype, 'c_fc', nx, n_state // world_size, axis=-1, use_bias=True)
+        # h0 = [tf.matmul(x, w, name='h0__slice__%d_of_%d' % (i, world_size)) + b for i, x, w, b in zip(range(world_size), x0, w0, b0)]
+
+        h0 = col_parallel(x0, dtype, 'c_fc', nx, n_state)
+
         h1 = [gelu(h) for h in h0]
+
         # w2, b2 = init_weight_bias_parallel(dtype, 'c_proj', n_state // world_size, nx, axis=-2, use_bias='full')
         # h2 = [tf.matmul(h, w, name='h2__slice__%d_of_%d' % (i, world_size)) for i, h, w in zip(range(world_size), h1, w2)]
         # h = tf.reduce_sum(tf.stack(h2, name='h2_stack'), axis=0, name='h_reduce_sum')
