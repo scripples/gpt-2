@@ -5,8 +5,10 @@ batch_size = 1
 #factor = 2; model_name='345M'; batch_size = 4 # OOM: 11.89GB
 #factor = 2; model_name='345M'; batch_size = 2 # Ran out of memory in memory space hbm. Used 9.53G of 8.00G hbm. Exceeded hbm capacity by 1.53G.
 
-factor = 4; model_name='345M'; batch_size = 2 # Ran out of memory in memory space hbm. Used 9.62G of 8.00G hbm. Exceeded hbm capacity by 1.62G.
-# https://gist.githubusercontent.com/shawwn/50ba2e6f6fcffd1e768b723af9ef7bab/raw/7aaed9673190036a6a5e50bb68fc322718a6deda/factor4_model345M_batchsize2_OOM.txt
+# factor = 4; model_name='345M'; batch_size = 2 # Ran out of memory in memory space hbm. Used 9.62G of 8.00G hbm. Exceeded hbm capacity by 1.62G.
+# # https://gist.githubusercontent.com/shawwn/50ba2e6f6fcffd1e768b723af9ef7bab/raw/7aaed9673190036a6a5e50bb68fc322718a6deda/factor4_model345M_batchsize2_OOM.txt
+
+factor = 2; model_name='117M'; batch_size = 8
 
 #factor = 8; model_name='1558M'
 import tflex_tpu_device_assignment; import tflex_tpu_topology; topology = tflex_tpu_topology.get_topology(res); dev = tflex_tpu_device_assignment.spatial_partition(topology, factor)
@@ -137,8 +139,28 @@ toks = tputil.tf_file_tok16('gs://tpu-usc1/datasets/dota2-ftfy.txt.tok16')
 
 sess.run(toks.initializer)
 
-# toks2 = tputil.tf_file_tok16('gs://tpu-usc1/datasets/openwebtext.tok16')
-# import time; now = time.time(); results = sess.run(toks2.initializer) ; elapsed = time.time() - now; results, elapsed
+toksmini = tputil.tf_file_tok16('gs://tpu-usc1/datasets/openwebtext-3b.tok16')
+sess.run(toksmini.initializer)
+
+
+toks2 = tputil.tf_file_tok16('gs://tpu-usc1/datasets/openwebtext-ftfy.tok16')
+toks2done = False
+infeed_batch2 = None
+
+def thunk():
+  import time; now = time.time()
+  results = sess.run(toks2.initializer)
+  elapsed = time.time() - now
+  print(results, elapsed)
+  global toks2done
+  toks2done = True
+  global infeed_batch2
+  infeed_batch2 = tpu_infeed_batch(toks2)
+
+import threading
+
+toks2loader = threading.Thread(target=thunk, daemon=True)
+toks2loader.start()
 
 
 
@@ -198,9 +220,14 @@ def op():
 
 def deq():
   zz = tpu_ops.shard(op, outputs_from_all_shards=True, num_shards=dev.num_replicas, inputs=[], device_assignment=dev); qq = sess.run(zz); print(qq)
+  return qq
 
 # #with tf.device(dev.host_device(replica=0, job='worker')):
 #zz = tpu_ops.shard(op, outputs_from_all_shards=True, num_shards=dev.num_replicas, inputs=[], device_assignment=dev); qq = sess.run(zz); print(qq)
+
+
+gradients = tf.gradients
+gradients = memory_saving_gradients.gradients
 
 
 def tpu_step(initial_loss):
@@ -209,7 +236,7 @@ def tpu_step(initial_loss):
     #context, context2 = sample_text(toks, amount=hparams.n_ctx, batch_size=args.batch_size)
     #context = sample_tokens()
     context = dequeue_tokens()
-    output = model.model(hparams=hparams, X=context)
+    output = model.model(hparams=hparams, X=context, checkpoint=True)
     loss = tf.reduce_mean(
         tf.nn.sparse_softmax_cross_entropy_with_logits(
           labels=context[:, 1:], logits=output['logits'][:, :-1]))
@@ -217,7 +244,7 @@ def tpu_step(initial_loss):
     opt = tf.tpu.CrossShardOptimizer(opt)
     all_vars = [v for v in tf.trainable_variables() if 'model' in v.name]
     train_vars = [v for v in all_vars if '/h' in v.name] if args.only_train_transformer_layers else all_vars
-    opt_grads = tf.gradients(loss, train_vars)
+    opt_grads = gradients(loss, train_vars)
     opt_grads = list(zip(opt_grads, train_vars))
     global sorted_grads
     sorted_grads = list(natsorted(opt_grads, key=lambda gv: gv[0].name))
@@ -248,6 +275,9 @@ sess.run(infeed_batch)
 # infeed_batch2 = tpu_infeed_batch(toks2)
 # sess.run(infeed_batch2)
 
+infeed_batch3 = tpu_infeed_batch(toksmini)
+sess.run(infeed_batch3)
+
 #infeed = tpu_infeed()
 #sess.run(infeed)
 
@@ -257,7 +287,7 @@ def tpu_loop():
   return tpu.repeat(iterations_var, tpu_step, [_INITIAL_LOSS])
 
 
-#train = tpu_ops.shard(train_op, outputs_from_all_shards=True, num_shards=dev.num_replicas, inputs=[context], device_assignment=dev)
+train = tpu_ops.shard(train_op, outputs_from_all_shards=True, num_shards=dev.num_replicas, inputs=[context], device_assignment=dev)
 #(compile_train, train) = tpu_ops.split_compile_and_shard(train_op, outputs_from_all_shards=True, num_shards=dev.num_replicas, inputs=[context], device_assignment=dev)
 (compile_train2, train2) = tpu_ops.split_compile_and_shard(tpu_loop, outputs_from_all_shards=True, num_shards=dev.num_replicas, inputs=[], device_assignment=dev)
 
@@ -266,7 +296,7 @@ sess.run(tf.global_variables_initializer())
 sess.run([x.initializer for x in sess.graph.get_collection_ref('variables')])
 
 #sess.run(compile_train2)
-import time; now = time.time(); results = sess.run(compile_train2) ; elapsed = time.time() - now; results, elapsed
+import time; now = time.time(); results = sess.run(compile_train2) ; elapsed = time.time() - now; print(results, elapsed)
 
 all_vars = [v for v in tf.trainable_variables() if 'model' in v.name]
 train_vars = [v for v in all_vars if '/h' in v.name] if args.only_train_transformer_layers else all_vars
@@ -277,6 +307,15 @@ import time
 import threading
 
 os.environ['MODEL_DIR'] = 'gs://tpu-usc1/runs/gpt-2/gptrun10parallel117m'
+
+os.environ['MODEL_DIR'] = 'gs://tpu-usc1/runs/gpt-2/gptrun11parallel117m'
+
+if model_name == '117M':
+  ckpt = tf.train.latest_checkpoint(os.environ['MODEL_DIR'])
+  gs = tf.train.get_or_create_global_step()
+  print('Restoring', ckpt)
+  saver.restore(sess, ckpt)
+  step = int(ckpt.split('-')[-1]); gs.load(step)
 
 if 'savers' not in globals():
   savers = []
@@ -308,6 +347,9 @@ def train_forever(infeed=None, save_every_minutes=30.0, model_dir=None):
     sess.run(infeed);
     now = time.time(); results = sess.run(train2) ; elapsed = time.time() - now;
     print(results, elapsed, sess.run(tf.train.get_global_step()))
+
+
+train_forever(infeed_batch2)
 
 iterations_var.load(1)
 
