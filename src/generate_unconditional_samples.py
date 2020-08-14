@@ -84,6 +84,7 @@ def sample_model(
                 text = enc.decode(out[i])
                 print("=" * 40 + " SAMPLE " + str(generated) + " " + "=" * 40)
                 print(text)
+                import pdb; pdb.set_trace()
 
 if __name__ == '__main__':
     fire.Fire(sample_model)

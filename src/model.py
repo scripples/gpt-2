@@ -167,7 +167,7 @@ def conv1d(x, scope, nf, *, hparams=None):
         lhs1 = W+b
         rhs1 = start+[nf]
         c = tf.reshape(lhs1, rhs1)
-        if api.should_break: pdb.set_trace()
+        #if api.should_break: pdb.set_trace()
         return c
 
 @op_scope
@@ -255,7 +255,7 @@ def mlp(x, scope, n_state, *, hparams):
         h1 = gelu(h0)
         h2 = conv1d(h1, 'c_proj', nx, hparams=hparams)
         h2 = dropout(h2, hparams.res_dropout)
-        if api.should_break: pdb.set_trace()
+        #if api.should_break: pdb.set_trace()
         return h2
 
 # @op_scope
@@ -392,8 +392,14 @@ def attn_parallel(x, scope, n_state, *, past, hparams, batch_size, seq_length):
 
     dtype = hparams.dtype if hparams else tf.float32
     with variable_scope(scope, dtype=dtype):
-        c = conv1d(x, 'c_attn', n_state*3, hparams=hparams)
-        q, k, v = map(split_heads, tf.split(c, 3, axis=-1))
+        #c = conv1d(x, 'c_attn', n_state*3, hparams=hparams)
+        #q0, k0, v0 = tf.split(c, 3, axis=-1)
+        q0 = conv1d(x, 'c_attn...0_of_3', n_state, hparams=hparams)
+        k0 = conv1d(x, 'c_attn...1_of_3', n_state, hparams=hparams)
+        v0 = conv1d(x, 'c_attn...2_of_3', n_state, hparams=hparams)
+        q, k, v = map(split_heads, [q0, k0, v0])
+        #import pdb; pdb.set_trace()
+        #if api.should_break: pdb.set_trace()
         present = tf.stack([k, v], axis=1)
         if past is not None:
             pk, pv = tf.unstack(past, axis=1)
@@ -442,7 +448,7 @@ def mlp_parallel(x, scope, n_state, *, hparams):
         # h = tf.add(h, b2, name='h_add_bias')
         h = row_parallel(h1, dtype, 'c_proj', n_state, nx)
         h = dropout(h, hparams.res_dropout)
-        if api.should_break: pdb.set_trace()
+        #if api.should_break: pdb.set_trace()
     return h, grad
   return func(x)[0]
 
@@ -509,8 +515,8 @@ def model(hparams, X, past=None, scope='model', reuse=tf.AUTO_REUSE, checkpoint=
         ## the GPU/CPU but may not be free on the TPU, so we want to minimize them to
         ## help the optimizer.
         batch_size, seq_length, hidden_size = shape_list(h)
-        #api.should_break = past is not None
-        if api.should_break: pdb.set_trace()
+        api.should_break = past is not None
+        #if api.should_break: pdb.set_trace()
         h = tf.reshape(h, [batch_size * seq_length, hidden_size])
 
         # Transformer
@@ -520,7 +526,7 @@ def model(hparams, X, past=None, scope='model', reuse=tf.AUTO_REUSE, checkpoint=
         #every = int(math.sqrt(hparams.n_layer))
         every = 1
         #tf.add_to_collection('checkpoints', h)
-        if api.should_break: pdb.set_trace()
+        #if api.should_break: pdb.set_trace()
         for layer, past in enumerate(pasts):
             h, present = block(h, 'h%d' % layer, past=past, hparams=hparams,
                 attn=attn, batch_size=batch, seq_length=sequence)

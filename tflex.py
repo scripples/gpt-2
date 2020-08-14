@@ -110,12 +110,39 @@ def latest_checkpoint(checkpoint_dir, latest_filename=None):
   ctr = ctrs.max()
   return os.path.join(checkpoint_dir, 'model-{}').format(ctr)
 
+
+def ensure_divisibility(numerator, denominator):
+    """Ensure that numerator is divisible by the denominator."""
+    assert numerator % denominator == 0, '{} is not divisible by {}'.format(
+        numerator, denominator)
+
+
+def divide(numerator, denominator):
+    """Ensure that numerator is divisible by the denominator and return
+    the division value."""
+    ensure_divisibility(numerator, denominator)
+    return numerator // denominator
+
+
+def variable_stride(variable, value):
+  name = variable.name
+  if '...' in name:
+    parts = [x for x in name.split('/') if '...' in x]
+    assert len(parts) == 1
+    index, count = [int(x) for x in parts[0].split('...')[-1].split('_of_')]
+    shape = variable.shape.as_list()
+    return np.split(value, count, axis=-1)[index]
+  return value
+
 def truncate_value(variable, value, reshape=True):
   varshape = variable.shape.as_list()
   valshape = value.shape
   if len(varshape) < len(valshape):
     assert valshape[0] == 1
     value = value[0]
+    valshape = value.shape
+  if '...' in variable.name:
+    value = variable_stride(variable, value)
     valshape = value.shape
   if '__slice__' in variable.name:
     # slice_index, slice_count = [int(x) for x in variable.name.split('__slice__')[-1].split(':')[0].split('_of_')]
@@ -247,7 +274,7 @@ def load_variables(ckpt, session=None, var_list=None, reshape=False):
   vs = var_list or tf.trainable_variables()
   with h5py.File(ckpt, "r") as f:
     for variables in tqdm.tqdm(list(split_by_params(vs))):
-      values = [truncate_value(x, f[variable_name(x)], reshape=reshape)  for x in variables]
+      values = [truncate_value(x, f[variable_name(x)][()], reshape=reshape)  for x in variables]
       assign_values(variables, values, session=session)
 
 def maketree(path):
@@ -284,6 +311,7 @@ def variable_name(variable):
   if variable is None:
     return None
   name = variable.name
+  name = '/'.join([x.split('...')[0] for x in name.split('/')])
   name = name.split('__slice__')[0]
   if ':' not in name:
     name = name + ':' + variable.name.split(':')[-1]
