@@ -392,11 +392,20 @@ def attn_parallel(x, scope, n_state, *, past, hparams, batch_size, seq_length):
 
     dtype = hparams.dtype if hparams else tf.float32
     with variable_scope(scope, dtype=dtype):
+        nx = x.shape[-1].value
         #c = conv1d(x, 'c_attn', n_state*3, hparams=hparams)
         #q0, k0, v0 = tf.split(c, 3, axis=-1)
-        q0 = conv1d(x, 'c_attn...0_of_3', n_state, hparams=hparams)
-        k0 = conv1d(x, 'c_attn...1_of_3', n_state, hparams=hparams)
-        v0 = conv1d(x, 'c_attn...2_of_3', n_state, hparams=hparams)
+        #q00 = conv1d(x, 'c_attn...0_of_3', n_state, hparams=hparams)
+        #k00 = conv1d(x, 'c_attn...1_of_3', n_state, hparams=hparams)
+        #v00 = conv1d(x, 'c_attn...2_of_3', n_state, hparams=hparams)
+        x0 = [x for _ in range(world_size)]
+        q0 = col_parallel(x0, dtype, 'c_attn...0_of_3', nx, n_state)
+        k0 = col_parallel(x0, dtype, 'c_attn...1_of_3', nx, n_state)
+        v0 = col_parallel(x0, dtype, 'c_attn...2_of_3', nx, n_state)
+        q0 = tf.concat(q0, axis=-1)
+        k0 = tf.concat(k0, axis=-1)
+        v0 = tf.concat(v0, axis=-1)
+        #import pdb; pdb.set_trace()
         q, k, v = map(split_heads, [q0, k0, v0])
         #import pdb; pdb.set_trace()
         #if api.should_break: pdb.set_trace()
