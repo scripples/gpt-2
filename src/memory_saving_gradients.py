@@ -78,8 +78,10 @@ def gradients(ys, xs, grad_ys=None, checkpoints='collection', **kwargs):
     fwd_ops = [op for op in fwd_ops if not '/assign' in op.name]
     fwd_ops = [op for op in fwd_ops if not '/Assign' in op.name]
     fwd_ops = [op for op in fwd_ops if not '/read' in op.name]
+    fwd_ops = [op for op in fwd_ops if not '/Read' in op.name]
+    fwd_ops = [op for op in fwd_ops if not '/Enter' in op.name]
     ts_all = ge.filter_ts(fwd_ops, True) # get the tensors
-    ts_all = [t for t in ts_all if '/read' not in t.name]
+    ts_all = [t for t in ts_all if '/read' not in t.name.lower()]
     ts_all = set(ts_all) - set(xs) - set(ys)
 
     # construct list of tensors to checkpoint during forward pass, if not
@@ -195,13 +197,17 @@ def gradients(ys, xs, grad_ys=None, checkpoints='collection', **kwargs):
         checkpoints_disconnected[x] = grad_node
 
     # partial derivatives to the checkpointed tensors and xs
-    ops_to_copy = fast_backward_ops(seed_ops=[y.op for y in ys],
-                                    stop_at_ts=checkpoints, within_ops=fwd_ops)
+    ops_to_copy = fast_backward_ops(seed_ops=[y.op for y in ys], stop_at_ts=checkpoints, within_ops=fwd_ops)
     debug_print("Found %s ops to copy within fwd_ops %s, seed %s, stop_at %s",
                     len(ops_to_copy), fwd_ops, [r.op for r in ys], checkpoints)
     debug_print("ops_to_copy = %s", ops_to_copy)
     debug_print("Processing list %s", ys)
-    copied_sgv, info = ge.copy_with_input_replacements(ge.sgv(ops_to_copy), {})
+    ops = ge.sgv(ops_to_copy)
+    #import pdb; pdb.set_trace()
+
+    with without_tpu_replicate(ops.ops):
+      copied_sgv, info = ge.copy_with_input_replacements(ops, {})
+
     for origin_op, op in info._transformed_ops.items():
         op._set_device(origin_op.node_def.device)
     copied_ops = info._transformed_ops.values()
@@ -247,7 +253,8 @@ def gradients(ys, xs, grad_ys=None, checkpoints='collection', **kwargs):
         debug_print("ops_to_copy = %s", ops_to_copy)
         if not ops_to_copy: # we're done!
             break
-        copied_sgv, info = ge.copy_with_input_replacements(ge.sgv(ops_to_copy), {})
+        with without_tpu_replicate(ops_to_copy):
+          copied_sgv, info = ge.copy_with_input_replacements(ge.sgv(ops_to_copy), {})
         for origin_op, op in info._transformed_ops.items():
             op._set_device(origin_op.node_def.device)
         copied_ops = info._transformed_ops.values()
@@ -356,7 +363,7 @@ def _is_iterable(o):
     return False
   return True
 
-DEBUG_LOGGING=False
+DEBUG_LOGGING=True
 def debug_print(s, *args):
   """Like logger.log, but also replaces all TensorFlow ops/tensors with their
   names. Sensitive to value of DEBUG_LOGGING, see enable_debug/disable_debug
@@ -385,3 +392,19 @@ def my_add_control_inputs(wait_to_do_ops, inputs_to_do_before):
     for op in wait_to_do_ops:
         ci = [i for i in inputs_to_do_before if op.control_inputs is None or i not in op.control_inputs]
         ge.add_control_inputs(op, ci)
+
+
+
+@contextlib.contextmanager
+def without_tpu_replicate(ops):
+  # prevent "TPU computations cannot be nested" error
+  tmp = []
+  try:
+    for op in ops:
+      if "_tpu_replicate" in op.node_def.attr:
+        tmp.append([op, op.node_def.attr["_tpu_replicate"]])
+        op._clear_attr("_tpu_replicate")
+    yield
+  finally:
+    for op, attr in tmp:
+      op._set_attr("_tpu_replicate", attr)
