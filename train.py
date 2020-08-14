@@ -240,7 +240,7 @@ def main():
         print('Initialized TPU')
         return True
       return False
-    tflex.sess = tflex.Session(config=config, init_tpu=args.init_tpu, graph=tflex.graph)
+    tflex.sess = tflex.Session(config=config, graph=tflex.graph)
     if args.init_tpu:
       initialize_tpu()
     with tflex.graph.as_default():
@@ -382,7 +382,7 @@ def main():
         def reopen(target):
           with tf.device(None):
             print(target, 'reopen: creating session')
-            sess = tflex.Session(target, config=tflex.sess.config, graph=tflex.graph, init_tpu=args.init_tpu)
+            sess = tflex.Session(target, config=tflex.sess.config, graph=tflex.graph)
             print(target, 'reopen: ensuring TPU')
             if args.init_tpu:
               initialize_tpu(session=sess)

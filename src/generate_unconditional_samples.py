@@ -20,8 +20,8 @@ def sample_model(
     nsamples=0,
     batch_size=1,
     length=None,
-    temperature=1,
-    top_k=0,
+    temperature=0.8,
+    top_k=40,
     top_p=0.0
 ):
     """
@@ -55,7 +55,8 @@ def sample_model(
     elif length > hparams.n_ctx:
         raise ValueError("Can't get samples longer than window size: %s" % hparams.n_ctx)
 
-    with tflex.Session(graph=tf.Graph()) as sess:
+    graph = tf.Graph()
+    with tf.Session(graph=graph) as sess:
         np.random.seed(seed)
         tf.set_random_seed(seed)
 
@@ -63,7 +64,7 @@ def sample_model(
             hparams=hparams, length=length,
             start_token=enc.encoder['<|endoftext|>'],
             batch_size=batch_size,
-            temperature=temperature, top_k=top_k, top_p=top_p
+            temperature=temperature, top_k=top_k, top_p=top_p, seed=seed
         )[:, 1:]
 
         saver = tflex.Saver()
@@ -72,6 +73,8 @@ def sample_model(
         ckpt = tflex.latest_checkpoint(restore_from)
         saver.restore(sess, ckpt)
         print('Loaded snapshot', ckpt)
+        #saver.save(sess, 'saved/model', global_step=0)
+        # sess.run([tf.global_variables_initializer(), tf.local_variables_initializer()])
 
         generated = 0
         while nsamples == 0 or generated < nsamples:

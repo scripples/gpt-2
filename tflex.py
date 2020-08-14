@@ -11,6 +11,8 @@ import tempfile
 import traceback
 import math
 
+from natsort import natsorted
+
 from tensorflow.contrib import tpu
 from tensorflow.contrib.cluster_resolver import TPUClusterResolver
 from tensorflow.python.framework import dtypes
@@ -74,22 +76,30 @@ class MonitoredSession(tf.train.MonitoredSession):
 
 state.split_param_count = 1e4
 
+def same_slice(v1, v2):
+  return variable_name(v1) == variable_name(v2)
+
 def split_by_params(vs, n=None, f=None):
+  vs = list(natsorted(vs, key=lambda v: v.name))
   if n is None:
     n = state.split_param_count
   if f is None:
     f = lambda x: np.prod(x.shape.as_list())
   i = 0
   xs = []
-  for variable in vs:
+  for idx, variable in enumerate(vs):
+    next_variable = None if idx >= len(vs) - 1 else vs[idx+1]
+    prev_variable = None if idx <= 0 else vs[idx-1]
+    if i >= n and not same_slice(variable, prev_variable):
+      if len(xs) > 0:
+        yield xs
+      xs = []
+      i = 0
     xs.append(variable)
     count = f(variable)
     i += count
-    if i >= n:
-      yield xs
-      xs = []
-      i = 0
-  yield xs
+  if len(xs) > 0:
+    yield xs
 
 def latest_checkpoint(checkpoint_dir, latest_filename=None):
   paths = [x for x in glob(os.path.join(checkpoint_dir, 'model-*.*')) if not x.endswith(".tmp")]
@@ -101,6 +111,36 @@ def latest_checkpoint(checkpoint_dir, latest_filename=None):
   return os.path.join(checkpoint_dir, 'model-{}').format(ctr)
 
 def truncate_value(variable, value, reshape=True):
+  varshape = variable.shape.as_list()
+  valshape = value.shape
+  if len(varshape) < len(valshape):
+    assert valshape[0] == 1
+    value = value[0]
+    valshape = value.shape
+  if '__slice__' in variable.name:
+    # slice_index, slice_count = [int(x) for x in variable.name.split('__slice__')[-1].split(':')[0].split('_of_')]
+    # if slice_count > 1:
+    #   i = -1
+    #   if varshape[i] == valshape[i]:
+    #     i -= 1
+    #   slice_stride = varshape[i]
+    #   assert slice_stride * slice_count == valshape[i]
+    #   if i == -1:
+    #     value = value[..., slice_stride*slice_index:slice_stride*(slice_index+1)]
+    #   elif i == -2:
+    #     value = value[..., slice_stride*slice_index:slice_stride*(slice_index+1), :]
+    #   else:
+    #     assert False
+    dimension, slice_index, slice_count = variable_slice(variable)
+    if slice_count > 1:
+      slice_stride = varshape[dimension]
+      assert slice_stride * slice_count == valshape[dimension]
+      if dimension == -1:
+        value = value[..., slice_stride*slice_index:slice_stride*(slice_index+1)]
+      elif dimension == -2:
+        value = value[..., slice_stride*slice_index:slice_stride*(slice_index+1), :]
+      else:
+        assert False
   if not reshape:
     return value
   shape = variable.shape.as_list()
@@ -241,9 +281,59 @@ def cast_variables(variables, graph=None, cache_ops=None):
 import re
 
 def variable_name(variable):
-  if re.match(r'core[0-9]+/', variable.name):
-    return variable.name.split('/', 1)[-1]
-  return variable.name
+  if variable is None:
+    return None
+  name = variable.name
+  name = name.split('__slice__')[0]
+  if re.match(r'core[0-9]+/', name):
+    name = name.split('/', 1)[-1]
+  return name
+
+def variable_slice(variable):
+  if '__slice__' in variable.name:
+    dimension, slice_index, slice_count = [int(x) for x in variable.name.split('__slice__')[-1].split(':')[0].split('_of_')]
+    return dimension, slice_index, slice_count
+  else:
+    return 0, 0, 0
+    # if slice_count > 1:
+    #   i = -1
+    #   if varshape[i] == valshape[i]:
+    #     i -= 1
+    #   slice_stride = varshape[i]
+    #   assert slice_stride * slice_count == valshape[i]
+    #   if i == -1:
+    #     value = value[..., slice_stride*slice_index:slice_stride*(slice_index+1)]
+    #   elif i == -2:
+    #     value = value[..., slice_stride*slice_index:slice_stride*(slice_index+1), :]
+    #   else:
+    #     assert False
+
+def join_variables(variables, values):
+  results = {}
+  final = []
+  def add(name, shape, value):
+    if name not in results:
+      results[name] = value
+      final.append((variable, shape, results[name]))
+  for variable, value in zip(variables, values):
+    name = variable_name(variable)
+    if '__slice__' not in variable.name:
+      add(name, variable.shape, value)
+    else:
+      dimension, slice_index, slice_count = variable_slice(variable)
+      shape = value.shape[:]
+      full_shape = list(shape[:])
+      full_shape[dimension] *= slice_count
+      add(name, full_shape, np.zeros(full_shape))
+      v = results[name]
+      #ind = np.indices([shape[dimension]]) + shape[dimension] * slice_index
+      #if ind.shape[0] == 1 and len(v.shape) == 1:
+      #  ind = ind[0]
+      l = np.ones_like(shape)
+      l[dimension] = -1
+      ind = np.reshape(np.arange(shape[dimension]), l) + (shape[dimension] * slice_index)
+      np.put_along_axis(v, ind, value, axis=dimension)
+  return final
 
 def save_variables(ckpt, session=None, var_list=None):
     session = session or tf.get_default_session()
@@ -254,9 +344,10 @@ def save_variables(ckpt, session=None, var_list=None):
       for variables in tqdm.tqdm(list(split_by_params(vs))):
         ops = cast_variables(variables)
         values = session.run(ops)
-        for value, variable in zip(values, variables):
+        #for value, variable in zip(values, variables):
+        for variable, shape, value in join_variables(variables, values):
           name = variable_name(variable)
-          shape = variable.shape.as_list()
+          #shape = variable.shape.as_list()
           dtype = variable.dtype
           dset = f.create_dataset(name, shape, dtype=np.float32)
           dset[:] = value

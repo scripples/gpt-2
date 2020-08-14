@@ -36,7 +36,7 @@ def top_p_logits(logits, p, epsilon=-1e10):
         )
 
 
-def sample_sequence(*, hparams, length, start_token=None, batch_size=None, context=None, temperature=1, top_k=0, top_p=0.0, epsilon=-1e10):
+def sample_sequence(*, hparams, length, start_token=None, batch_size=None, context=None, temperature=1, top_k=0, top_p=0.0, epsilon=-1e10, seed=None):
     if start_token is None:
         assert context is not None, 'Specify exactly one of start_token and context!'
     else:
@@ -69,7 +69,7 @@ def sample_sequence(*, hparams, length, start_token=None, batch_size=None, conte
                 logits = top_p_logits(logits, p=top_p, epsilon=epsilon)
             else:
                 logits = top_k_logits(logits, k=top_k, epsilon=epsilon)
-            samples = tf.multinomial(logits, num_samples=1, output_dtype=tf.int32)
+            samples = tf.multinomial(logits, num_samples=1, output_dtype=tf.int32, seed=seed)
             return [
                 tf.concat([past, next_outputs['presents']], axis=-2),
                 tf.squeeze(samples, axis=[1]),

@@ -6,6 +6,36 @@ import math
 import tflex
 from collections import OrderedDict
 from tensorflow.python.framework import ops as tf_ops
+import pdb
+import functools
+
+
+class Context():
+  def __init__(self):
+    self.should_break = False
+
+  def set_trace(self):
+    if self.should_break:
+      pdb.set_trace()
+
+
+api = Context()
+
+def variable_scope(*args, **kws):
+  return tf.variable_scope(*args, **kws, use_resource=True)
+
+
+def op_scope(fn, name=None):
+    if name is None:
+        name = fn.__name__
+    @functools.wraps(fn)
+    def _fn(*args, **kwargs):
+        with tf.name_scope(fn.__name__):
+            return fn(*args, **kwargs)
+    return _fn
+
+
+
 
 def default_hparams():
     return HParams(
@@ -48,6 +78,7 @@ def get_core(i, session=None):
     return cores[i % len(cores)].name
 
 
+@op_scope
 def get_variable(name):
     name = os.path.join(tf.get_variable_scope().name, name)
     vs = tf.trainable_variables()
@@ -55,50 +86,72 @@ def get_variable(name):
         if x.name.startswith(name + ':'):
             return x
 
+@op_scope
 def shape_list(x):
     """Deal with dynamic shape in tensorflow cleanly."""
     static = x.shape.as_list()
     dynamic = tf.shape(x)
     return [dynamic[i] if s is None else s for i, s in enumerate(static)]
 
+@op_scope
 def softmax(x, axis=-1):
     x = x - tf.reduce_max(x, axis=axis, keepdims=True)
     ex = tf.exp(x)
     return ex / tf.reduce_sum(ex, axis=axis, keepdims=True)
 
+@op_scope
 def gelu(x):
     return 0.5*x*(1+tf.tanh(np.sqrt(2/np.pi)*(x+0.044715*tf.pow(x, 3))))
 
+@op_scope
 def norm(x, scope, *, axis=-1, epsilon=1e-5, hparams=None):
     """Normalize to mean = 0, std = 1, then do a diagonal affine transform."""
     dtype = hparams.dtype if hparams else tf.float32
-    with tf.variable_scope(scope, dtype=dtype):
+    with variable_scope(scope, dtype=dtype):
         n_state = x.shape[-1].value
-        g = get_variable('g') or tf.get_variable('g', [n_state], initializer=tf.constant_initializer(1, dtype=dtype))
-        b = get_variable('b') or tf.get_variable('b', [n_state], initializer=tf.constant_initializer(0, dtype=dtype))
+        g = init_variable('g', [n_state], tf.constant_initializer(1, dtype=dtype))
+        b = init_variable('b', [n_state], tf.constant_initializer(0, dtype=dtype))
         u = tf.reduce_mean(x, axis=axis, keepdims=True)
         s = tf.reduce_mean(tf.square(x-u), axis=axis, keepdims=True)
         x = (x - u) * tf.rsqrt(s + epsilon)
         x = x*g + b
         return x
 
+@op_scope
 def split_states(x, n):
     """Reshape the last dimension of x into [n, x.shape[-1]/n]."""
     *start, u, v = shape_list(x)
     m = u * v
     return tf.reshape(x, start + [n, m//n])
 
+@op_scope
 def merge_states(x):
     """Smash the last two dimensions of x into a single dimension."""
     *start, a, b = shape_list(x)
     return tf.reshape(x, start + [a*b])
 
-def conv1d(x, scope, nf, *, w_init_stdev=0.02, hparams=None):
+@op_scope
+def normal_initializer(dtype, stddev=0.02):
+  return tf.random_normal_initializer(stddev=stddev, dtype=dtype)
+
+@op_scope
+def constant_initializer(dtype, value=0):
+  return tf.constant_initializer(value=value, dtype=dtype)
+
+@op_scope
+def init_variable(name, shape, initializer):
+  v = get_variable(name)
+  if v is not None:
+    return v
+  return tf.get_variable(name, shape=shape, initializer=initializer, use_resource=True)
+
+@op_scope
+def conv1d(x, scope, nf, *, hparams=None):
     dtype = hparams.dtype if hparams else tf.float32
-    with tf.variable_scope(scope, dtype=dtype):
+    with variable_scope(scope, dtype=dtype):
         *start, nx = shape_list(x)
-        w = get_variable('w') or tf.get_variable('w', [1, nx, nf], initializer=tf.random_normal_initializer(stddev=w_init_stdev, dtype=dtype))
-        b = get_variable('b') or tf.get_variable('b', [nf], initializer=tf.constant_initializer(0, dtype=dtype))
+        w = init_variable('w', [nx, nf], initializer=normal_initializer(dtype=dtype))
+        b = init_variable('b', [nf], initializer=constant_initializer(dtype=dtype))
         lhs = tf.reshape(x, [-1, nx])
         rhs = tf.reshape(w, [-1, nf])
         if False: # noticeable slowdown https://i.imgur.com/95VAycJ.png
@@ -114,8 +167,10 @@ def conv1d(x, scope, nf, *, w_init_stdev=0.02, hparams=None):
         lhs1 = W+b
         rhs1 = start+[nf]
         c = tf.reshape(lhs1, rhs1)
+        if api.should_break: pdb.set_trace()
         return c
 
+@op_scope
 def attention_mask(nd, ns, *, dtype):
     """1's in the lower triangle, counting from the lower right corner.
 
@@ -127,6 +182,7 @@ def attention_mask(nd, ns, *, dtype):
     return tf.cast(m, dtype)
 
 
+@op_scope
 def attn(x, scope, n_state, *, past, hparams, batch_size, seq_length):
     assert x.shape.ndims == 2  # Should be [batch*sequence, features]
     assert n_state % hparams.n_head == 0
@@ -138,12 +194,14 @@ def attn(x, scope, n_state, *, past, hparams, batch_size, seq_length):
     if past is not None:
         assert past.shape.ndims == 5  # Should be [batch, 2, heads, sequence, features], where 2 is [k, v]
 
+    @op_scope
     def split_heads(x):
         # From [batch, sequence, features] to [batch, heads, sequence, features]
         x = tf.reshape(x, [batch_size, seq_length, num_attention_heads, size_per_head])
         x = split_states(x, hparams.n_head)
         return tf.transpose(x, [0, 2, 1, 3])
 
+    @op_scope
     def merge_heads(x):
         # Reverse of split_heads
         x = tf.transpose(x, [0, 2, 1, 3])
@@ -151,6 +209,7 @@ def attn(x, scope, n_state, *, past, hparams, batch_size, seq_length):
         x = tf.reshape(x, [batch_size * seq_length, num_attention_heads * size_per_head])
         return x
 
+    @op_scope
     def mask_attn_weights(w):
         # w has shape [batch, heads, dst_sequence, src_sequence], where information flows from src to dst.
         _, _, nd, ns = shape_list(w)
@@ -159,6 +218,7 @@ def attn(x, scope, n_state, *, past, hparams, batch_size, seq_length):
         w = w*b - tf.cast(65500 if w.dtype == tf.float16 else 1e10, w.dtype)*(1-b)
         return w
 
+    @op_scope
     def multihead_attn(q, k, v):
         # q, k, v have shape [batch, heads, sequence, features]
         w = tf.matmul(q, k, transpose_b=True)
@@ -171,7 +231,7 @@ def attn(x, scope, n_state, *, past, hparams, batch_size, seq_length):
         return a
 
     dtype = hparams.dtype if hparams else tf.float32
-    with tf.variable_scope(scope, dtype=dtype):
+    with variable_scope(scope, dtype=dtype):
         c = conv1d(x, 'c_attn', n_state*3, hparams=hparams)
         q, k, v = map(split_heads, tf.split(c, 3, axis=-1))
         present = tf.stack([k, v], axis=1)
@@ -186,54 +246,129 @@ def attn(x, scope, n_state, *, past, hparams, batch_size, seq_length):
         return a, present
 
 
+@op_scope
 def mlp(x, scope, n_state, *, hparams):
     dtype = hparams.dtype if hparams else tf.float32
-    with tf.variable_scope(scope, dtype=dtype):
+    with variable_scope(scope, dtype=dtype):
         nx = x.shape[-1].value
-        h = gelu(conv1d(x, 'c_fc', n_state, hparams=hparams))
-        h2 = conv1d(h, 'c_proj', nx, hparams=hparams)
+        h0 = conv1d(x, 'c_fc', n_state, hparams=hparams)
+        h1 = gelu(h0)
+        h2 = conv1d(h1, 'c_proj', nx, hparams=hparams)
         h2 = dropout(h2, hparams.res_dropout)
+        if api.should_break: pdb.set_trace()
         return h2
 
+api.custom_grads = []
+
+
+# @op_scope
+# def mlp_parallel(x, scope, n_state, *, hparams):
+#   @tf.custom_gradient
+#   def func(x):
+#     def grad(dy, variables=None):
+#       api.custom_grads.append([dy, variables, x])
+#       #import pdb; pdb.set_trace()
+#       return dy
+#     world_size = get_model_parallel_world_size()
+#     dtype = hparams.dtype if hparams else tf.float32
+#     with variable_scope(scope, dtype=dtype):
+#         nx = x.shape[-1].value
+#         ensure_divisibility(n_state, world_size)
+#         ensure_divisibility(nx, world_size)
+#         #x0 = clone_tensor_to_each_device(x)
+#         x0 = [x for _ in range(world_size)]
+#         w0, b0 = init_weight_bias_parallel(dtype, 'c_fc', nx, n_state // world_size, use_bias=True)
+#         h0 = [tf.matmul(x, w) + b for x, w, b in zip(x0, w0, b0)]
+#         h1 = [gelu(h) for h in h0]
+#         w2, b2 = init_weight_bias_parallel(dtype, 'c_proj', n_state // world_size, nx, use_bias='full')
+#         h2 = [tf.matmul(h, w) for h, w in zip(h1, w2)]
+#         h = tf.reduce_sum(tf.stack(h2), axis=0)
+#         h = h + b2
+#         h = dropout(h, hparams.res_dropout)
+#         if api.should_break: pdb.set_trace()
+#     return h, grad
+#   return func(x)
+
+@op_scope
+def mlp_parallel(x, scope, n_state, *, hparams):
+  def func(x):
+    def grad(dy, variables=None):
+      api.custom_grads.append([dy, variables, x])
+      #import pdb; pdb.set_trace()
+      return dy
+    world_size = get_model_parallel_world_size()
+    dtype = hparams.dtype if hparams else tf.float32
+    with variable_scope(scope, dtype=dtype):
+        nx = x.shape[-1].value
+        ensure_divisibility(n_state, world_size)
+        ensure_divisibility(nx, world_size)
+        #x0 = clone_tensor_to_each_device(x)
+        x0 = [x for _ in range(world_size)]
+        w0, b0 = init_weight_bias_parallel(dtype, 'c_fc', nx, n_state // world_size, axis=-1, use_bias=True)
+        h0 = [tf.matmul(x, w, name='h0__slice__%d_of_%d' % (i, world_size)) + b for i, x, w, b in zip(range(world_size), x0, w0, b0)]
+        h1 = [gelu(h) for h in h0]
+        w2, b2 = init_weight_bias_parallel(dtype, 'c_proj', n_state // world_size, nx, axis=-2, use_bias='full')
+        h2 = [tf.matmul(h, w, name='h2__slice__%d_of_%d' % (i, world_size)) for i, h, w in zip(range(world_size), h1, w2)]
+        h = tf.reduce_sum(tf.stack(h2, name='h2_stack'), axis=0, name='h_reduce_sum')
+        h = tf.add(h, b2, name='h_add_bias')
+        h = dropout(h, hparams.res_dropout)
+        if api.should_break: pdb.set_trace()
+    return h, grad
+  return func(x)[0]
+
+
+@op_scope
 def dropout(x, pdrop=0.1, train=True):
     if train and pdrop > 0:
         x = tf.nn.dropout(x, rate=pdrop)
     return x
 
+
+@op_scope
 def block(x, scope, *, past, hparams, attn, **attn_kws):
     dtype = hparams.dtype if hparams else tf.float32
-    with tf.variable_scope(scope, dtype=dtype):
+    with variable_scope(scope, dtype=dtype):
         nx = x.shape[-1].value
-        a, present = attn(norm(x, 'ln_1', hparams=hparams), 'attn', nx, past=past, hparams=hparams, **attn_kws)
+        x0 = norm(x, 'ln_1', hparams=hparams)
+        a, present = attn(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
         x = x + a
-        m = mlp(norm(x, 'ln_2', hparams=hparams), 'mlp', nx*4, hparams=hparams)
+        x1 = norm(x, 'ln_2', hparams=hparams)
+        #m = mlp(x1, 'mlp', nx*4, hparams=hparams)
+        m = mlp_parallel(x1, 'mlp', nx*4, hparams=hparams)
+        #m = GPT2MLP(hidden_size=nx, hparams=hparams)(x1)
+        #m = GPT2ParallelMLP(hidden_size=nx, hparams=hparams)(x1)
+        #import pdb; pdb.set_trace()
         x = x + m
         return x, present
 
+@op_scope
 def past_shape(*, hparams, batch_size=None, sequence=None):
     return [batch_size, hparams.n_layer, 2, hparams.n_head, sequence, hparams.n_embd // hparams.n_head]
 
+@op_scope
 def expand_tile(value, size):
     """Add a new axis of given size."""
     value = tf.convert_to_tensor(value, name='value')
     ndims = value.shape.ndims
     return tf.tile(tf.expand_dims(value, axis=0), [size] + [1]*ndims)
 
+@op_scope
 def positions_for(tokens, past_length):
     batch_size = tf.shape(tokens)[0]
     nsteps = tf.shape(tokens)[1]
     return expand_tile(past_length + tf.range(nsteps), batch_size)
 
 
+@op_scope
 def model(hparams, X, past=None, scope='model', reuse=tf.AUTO_REUSE, checkpoint=False):
     dtype = hparams.dtype if hparams else tf.float32
-    with tf.variable_scope(scope, reuse=reuse, dtype=dtype):
+    with variable_scope(scope, reuse=reuse, dtype=dtype):
         results = {}
         batch, sequence = shape_list(X)
 
-        wpe = get_variable('wpe') or tf.get_variable('wpe', [hparams.n_ctx, hparams.n_embd],
+        wpe = init_variable('wpe', [hparams.n_ctx, hparams.n_embd],
                              initializer=tf.random_normal_initializer(stddev=0.01, dtype=dtype))
-        wte = get_variable('wte') or tf.get_variable('wte', [hparams.n_vocab, hparams.n_embd],
+        wte = init_variable('wte', [hparams.n_vocab, hparams.n_embd],
                              initializer=tf.random_normal_initializer(stddev=0.02, dtype=dtype))
         past_length = 0 if past is None else tf.shape(past)[-2]
         h = tf.gather(wte, X) + tf.gather(wpe, positions_for(X, past_length))
@@ -243,6 +378,8 @@ def model(hparams, X, past=None, scope='model', reuse=tf.AUTO_REUSE, checkpoint=
         ## the GPU/CPU but may not be free on the TPU, so we want to minimize them to
         ## help the optimizer.
         batch_size, seq_length, hidden_size = shape_list(h)
+        #api.should_break = past is not None
+        if api.should_break: pdb.set_trace()
         h = tf.reshape(h, [batch_size * seq_length, hidden_size])
 
         # Transformer
@@ -252,6 +389,7 @@ def model(hparams, X, past=None, scope='model', reuse=tf.AUTO_REUSE, checkpoint=
         #every = int(math.sqrt(hparams.n_layer))
         every = 1
         #tf.add_to_collection('checkpoints', h)
+        if api.should_break: pdb.set_trace()
         for layer, past in enumerate(pasts):
             h, present = block(h, 'h%d' % layer, past=past, hparams=hparams,
                 attn=attn, batch_size=batch, seq_length=sequence)
@@ -315,6 +453,7 @@ def absolute_variable_scope(scope, **kwargs):
     return tf.variable_scope(tf.VariableScope(name=scope, **kwargs), auxiliary_name_scope=False)
 
 
+@op_scope
 def all_sum_plain(g, colocate=True, *args, **kws):
   r = []
   for i in range(len(g)):
@@ -432,7 +571,7 @@ def shard(batch_size, hparams, learning_rate=0.0001, optimizer='sgd', noise=0.0,
         #context = contexts[i]
         #context = tf.placeholder(tf.int32, [batch_size // num_cores, None])
         #context_in = randomize(context, hparams, noise)
-        with tf.device(core), bfloat16context(hparams), tf.variable_scope(prefix, reuse=tf.AUTO_REUSE):
+        with tf.device(core), bfloat16context(hparams), variable_scope(prefix, reuse=tf.AUTO_REUSE):
           context = tf.Variable(tf.zeros(shape=[batch_size // num_cores, sample_ctx], name="context", dtype=tf.int32), dtype=tf.int32, shape=[batch_size // num_cores, sample_ctx], trainable=False)
           #context_set = tf.placeholder(tf.int32, [batch_size // num_cores, None])
           #feed_op = tf.assign(context, context_set)
@@ -476,7 +615,7 @@ def shard(batch_size, hparams, learning_rate=0.0001, optimizer='sgd', noise=0.0,
         parameter_count = sum([np.prod(v.shape.as_list()) for v in train_vars])
         print("Shard %d is using %d parameters (%.2fM) (scope='%s/')" % (i, parameter_count, parameter_count/(1024.0*1024.0), path))
 
-        with tf.device(core), bfloat16context(hparams), tf.variable_scope(prefix, reuse=tf.AUTO_REUSE):
+        with tf.device(core), bfloat16context(hparams), variable_scope(prefix, reuse=tf.AUTO_REUSE):
           if optimizer == 'adam':
               opt = tf.train.AdamOptimizer(learning_rate=learning_rate)
           elif optimizer == 'sgd':
@@ -776,3 +915,773 @@ def shard(batch_size, hparams, learning_rate=0.0001, optimizer='sgd', noise=0.0,
       the.vars = the_vars
       the.all_vars = all_vars
       return results
+
+
+
+# Model parallel group that the current rank belongs to.
+_MODEL_PARALLEL_GROUP = None
+
+
+# Data parallel group that the current rank belongs to.
+_DATA_PARALLEL_GROUP = None
+
+
+def initialize_model_parallel(model_parallel_size_, topology=None):
+    """
+    Initialize model data parallel groups.
+
+    Arguments:
+        model_parallel_size: number of GPUs used to parallelize model.
+
+    Let's say we have a total of 8 GPUs denoted by g0 ... g7 and we
+    use 2 GPUs to parallelize the model. The present function will
+    create 4 model parallel groups and 2 data parallel grous as:
+        4 model parallel groups:
+            [g0, g1], [g2, g3], [g4, g5], [g6, g7]
+        2 data parallel groups:
+            [g0, g2, g4, g6], [g1, g3, g5, g7]
+    Note that for efficiency, the caller should make sure adjacent ranks
+    are on the same DGX box. For example if we are using 2 DGX-1 boxes
+    with a total of 16 GPUs, rank 0 to 7 belong to the first box and
+    ranks 8 to 15 belong to the second box.
+    """
+    # if torch.distributed.get_rank() == 0:
+    #     print('> initializing model parallel with size {}'.format(
+    #         model_parallel_size_))
+    # # Get world size and rank. Ensure some consistencies.
+    # assert torch.distributed.is_initialized()
+    # world_size = torch.distributed.get_world_size()
+    # model_parallel_size = min(model_parallel_size_, world_size)
+    # ensure_divisibility(world_size, model_parallel_size)
+    # rank = torch.distributed.get_rank()
+    #
+    # # Build the data parallel groups.
+    # global _DATA_PARALLEL_GROUP
+    # assert _DATA_PARALLEL_GROUP is None, \
+    #     'data parallel group is already initialized'
+    # for i in range(model_parallel_size):
+    #     ranks = range(i, world_size, model_parallel_size)
+    #     group = torch.distributed.new_group(ranks)
+    #     if i == (rank % model_parallel_size):
+    #         _DATA_PARALLEL_GROUP = group
+    #
+    # # Build the model parallel groups.
+    # global _MODEL_PARALLEL_GROUP
+    # assert _MODEL_PARALLEL_GROUP is None, \
+    #     'model parallel group is already initialized'
+    # for i in range(world_size // model_parallel_size):
+    #     ranks = range(i * model_parallel_size,
+    #                   (i + 1) * model_parallel_size)
+    #     group = torch.distributed.new_group(ranks)
+    #     if i == (rank // model_parallel_size):
+    #         _MODEL_PARALLEL_GROUP = group
+    global _MODEL_PARALLEL_GROUP
+    global _DATA_PARALLEL_GROUP
+    if topology is None:
+      topology = tflex_tpu_topology.get_topology()
+    num_cores = np.prod(topology.mesh_shape)
+    ensure_divisibility(num_cores, model_parallel_size_)
+    #_MODEL_PARALLEL_GROUP = num_cores // model_parallel_size_
+    #_DATA_PARALLEL_GROUP = model_parallel_size_
+    _MODEL_PARALLEL_GROUP = tflex_tpu_device_assignment.spatial_partition(topology, model_parallel_size_)
+    _DATA_PARALLEL_GROUP = _MODEL_PARALLEL_GROUP
+
+
+
+def get_data_parallel_group():
+  return None
+
+
+def get_model_parallel_group():
+  return None
+
+
+def torch_distributed_get_world_size(group=None):
+  #return 1
+  return 4
+  #return 2
+
+
+def get_model_parallel_group():
+    """Get the model parallel group the caller rank belongs to."""
+    # assert _MODEL_PARALLEL_GROUP is not None, \
+    #     'model parallel group is not initialized'
+    return _MODEL_PARALLEL_GROUP
+
+
+def get_data_parallel_group():
+    """Get the data parallel group the caller rank belongs to."""
+    # assert _DATA_PARALLEL_GROUP is not None, \
+    #     'data parallel group is not initialized'
+    return _DATA_PARALLEL_GROUP
+
+
+def get_model_parallel_world_size():
+    """Return world size for the model parallel group."""
+    return torch_distributed_get_world_size(group=get_model_parallel_group())
+
+
+
+
+def device_for_tpu_core(task=0, core=0, job="worker"):
+  #return "/job:%s/task:%d/device:TPU_REPLICATED_CORE:%d" % (job, task, core)
+  return None
+
+
+@op_scope
+def clone_tensor_to_each_device(tensor):
+  assert not isinstance(tensor, list)
+  group = get_model_parallel_group()
+  world_size = torch_distributed_get_world_size(group=group)
+  # Bypass the function if we are using only 1 GPU.
+  if world_size == 1:
+      return [tensor]
+  ops = []
+  for core in range(world_size):
+    with tf.device(device_for_tpu_core(core=core)):
+      x = tf.identity(tensor)
+      ops.append(x)
+  return ops
+
+
+@op_scope
+def split_tensor_along_last_dim(tensor, num_partitions, contiguous_split_chunks=False):
+  assert not isinstance(tensor, list)
+  pieces = tf.split(tensor, num_partitions, axis=-1)
+  ops = []
+  for core in range(num_partitions):
+    with tf.device(device_for_tpu_core(core=core)):
+      x = tf.identity(pieces[core])
+      ops.append(x)
+  return ops
+
+
+@op_scope
+def _reduce(input_):
+    """All-reduce the the input tensor across model parallel group."""
+    group = get_model_parallel_group()
+    # Bypass the function if we are using only 1 GPU.
+    if torch_distributed_get_world_size(group=group) == 1:
+        return input_
+    ## All-reduce.
+    #torch_distributed_all_reduce(input_, group=group)
+    output = all_sum_plain(input_)
+    # world_size = torch_distributed_get_world_size(group=group)
+    # ops = []
+    # for core in range(world_size):
+    #   with tf.colocate_with(input_[core]):
+    #     ops.append(tf.add_n([x for x in input_]))
+    # return ops
+    return output
+
+
+@op_scope
+def _split(input_):
+    """Split the tensor along its last dimension and keep the
+    corresponding slice."""
+    group = get_model_parallel_group()
+    # Bypass the function if we are using only 1 GPU.
+    if torch_distributed_get_world_size(group=group) == 1:
+        return input_
+    # Split along last dimension.
+    world_size = torch_distributed_get_world_size(group=group)
+    input_list = split_tensor_along_last_dim(input_, world_size)
+    # # Note: torch.split does not create contiguous tensors by default.
+    # rank = torch_distributed_get_rank(group=group)
+    # output = input_list[rank].contiguous()
+    output = input_list
+    return output
+
+
+@op_scope
+def _gather(input_):
+    """Gather tensors and concatinate along the last dimension."""
+    group = get_model_parallel_group()
+    # Bypass the function if we are using only 1 GPU.
+    if torch_distributed_get_world_size(group=group) == 1:
+        return input_
+    # # Size and dimension.
+    # last_dim = input_.dim() - 1
+    # rank = torch.distributed.get_rank(group=group)
+    # world_size = torch.distributed.get_world_size(group=group)
+    #
+    # tensor_list = [torch.empty_like(input_) for _ in range(world_size)]
+    # tensor_list[rank] = input_
+    # torch.distributed.all_gather(tensor_list, input_, group=group)
+    #
+    # # Note: torch.cat already creates a contiguous tensor.
+    # output = torch.cat(tensor_list, dim=last_dim).contiguous()
+    output = [tf.concat(input_, axis=-1)]
+    return output
+
+
+# dev = tflex_tpu_device_assignment.spatial_partition(topology, get_model_parallel_world_size())
+# op = tpu_ops.shard(lambda: _reduce(_split(tf.ones([16]))), device_assignment=dev)
+
+from six import with_metaclass
+
+from functools import partial
+
+
+class BackwardCFunction:#(_C._FunctionBase, _ContextMethodMixin, _HookMixin):
+  _is_legacy = False
+
+  def _apply(self, input_, **kwargs):
+    #return self._forward_cls.backward(self, *args)
+    self.props = kwargs
+    forward = partial(self._forward_cls.forward, self)
+    backward = partial(self._forward_cls.backward, self)
+    @tf.custom_gradient
+    def func(x):
+      def grad(dy, variables=None):
+        self.grad_variables = variables
+        return backward(dy)
+      return forward(x), grad
+    return func(input_)
+
+  def apply(self, input_):
+    if isinstance(input_, (tuple, list)):
+      #return [self._apply(x, boxed=input_, index=i, is_list=True) for i, x in enumerate(input_)]
+      #return [self._apply(x, boxed=input_, index=i, is_list=True) for i, x in enumerate(input_)]
+      ops = []
+      self.reduce = False
+      for i, x in enumerate(input_):
+        with tf.device(device_for_tpu_core(core=i)):
+          ops.append(self._apply(x, boxed=input_, index=i, is_list=True))
+      if self.reduce:
+        #pdb.set_trace()
+        ops = _reduce(ops)[0]
+      return ops
+    return self._apply(input_, boxed=[input_], index=0, is_list=False)
+
+
+class FunctionMeta(type):
+  """Function metaclass.
+
+  This metaclass sets up the following properties:
+      _is_legacy: True if forward is not defined as a static method.
+      _backward_cls: The Function class corresponding to the differentiated
+          version of this function (which is generated on the fly by this
+          metaclass).
+  """
+  def __init__(cls, name, bases, attrs):
+    for super_cls in cls.mro():
+      forward = super_cls.__dict__.get('forward')
+      if forward is not None:
+        has_static_forward = isinstance(forward, staticmethod) or isinstance(forward, classmethod)
+        break
+    cls._is_legacy = not has_static_forward
+    # old-style functions
+    if not has_static_forward:
+      return super(FunctionMeta, cls).__init__(name, bases, attrs)
+    backward_fn = type(name + 'Backward', (BackwardCFunction,), {'_forward_cls': cls})
+    cls._backward_cls = backward_fn
+    return super(FunctionMeta, cls).__init__(name, bases, attrs)
+
+
+class _Function(with_metaclass(FunctionMeta)):#, _C._FunctionBase, _ContextMethodMixin, _HookMixin)):
+  @classmethod
+  def apply(cls, *args, **kwargs): # real signature unknown
+    return cls._backward_cls().apply(*args, **kwargs)
+  @staticmethod
+  def forward(ctx, input_):
+    return input_
+  @staticmethod
+  def backward(ctx, grad_output):
+    return grad_output
+
+
+# class _FooFunction(_Function):
+#     @staticmethod
+#     def forward(ctx, input_):
+#         return input_
+#     @staticmethod
+#     def backward(ctx, grad_output):
+#         return tf.zeros_like(grad_output)
+
+
+#_FooFunction.apply(tf.ones([16]))
+# x = tf.constant(100.); y = _FooFunction.apply(x); dy =  tf.gradients(y, x); 
+
+
+# class _CopyToModelParallelRegion(_Function):
+#   """Pass the input to the model parallel region."""
+#   @staticmethod
+#   def forward(ctx, input_):
+#     return input_
+#   @staticmethod
+#   def backward(ctx, grad_output):
+#     return _reduce(grad_output)
+
+
+# class _ReduceFromModelParallelRegion(_Function):
+#   """All-redcue the input from the model parallel region."""
+#   @staticmethod
+#   def forward(ctx, input_):
+#     return _reduce(input_)
+#   @staticmethod
+#   def backward(ctx, grad_output):
+#     return grad_output
+
+
+class _CopyToModelParallelRegion(_Function):
+  """Pass the input to the model parallel region."""
+  @staticmethod
+  def forward(ctx, input_):
+    return clone_tensor_to_each_device(input_)
+  @staticmethod
+  def backward(ctx, grad_output):
+    return _reduce(grad_output)[0]
+
+
+class _ReduceFromModelParallelRegion(_Function):
+  """All-reduce the input from the model parallel region."""
+  @staticmethod
+  def forward(ctx, input_):
+    return _reduce(input_)[0]
+  @staticmethod
+  def backward(ctx, grad_output):
+    return clone_tensor_to_each_device(grad_output)
+
+
+
+class _ScatterToModelParallelRegion(_Function):
+  """Split the input and keep only the corresponding chuck to the rank."""
+  @staticmethod
+  def forward(ctx, input_):
+    return _split(input_)
+  @staticmethod
+  def backward(ctx, grad_output):
+    return _gather(grad_output)
+
+
+class _GatherFromModelParallelRegion(_Function):
+  """Gather the input from model parallel region and concatinate."""
+  @staticmethod
+  def forward(ctx, input_):
+    return _gather(input_)
+  @staticmethod
+  def backward(ctx, grad_output):
+    return _split(grad_output)
+
+
+# -----------------
+# Helper functions.
+# -----------------
+
+
+@op_scope
+def copy_to_model_parallel_region(input_):
+    return _CopyToModelParallelRegion.apply(input_)
+
+
+@op_scope
+def reduce_from_model_parallel_region(input_):
+    return _ReduceFromModelParallelRegion.apply(input_)
+
+
+@op_scope
+def scatter_to_model_parallel_region(input_):
+    return _ScatterToModelParallelRegion.apply(input_)
+
+
+@op_scope
+def gather_from_model_parallel_region(input_):
+    return _GatherFromModelParallelRegion.apply(input_)
+
+
+# copy_to_model_parallel_region(tf.ones([16]))
+
+
+
+
+
+
+
+
+
+
+
+
+
+class _Module:
+  def __init__(self):
+    self.model_parallel = False
+  def forward(self, x):
+    return x
+  def backward(self, dy):
+    return dy
+  def __call__(self, x):
+    class _Call(_Function):
+      @staticmethod
+      def forward(ctx, *args):
+        self.ctx = ctx
+        return self.forward(*args)
+      @staticmethod
+      def backward(ctx, *args):
+        self.ctx = ctx
+        if self.model_parallel:
+          import pdb; pdb.set_trace()
+        return self.backward(*args)
+    if self.model_parallel:
+      #import pdb; pdb.set_trace()
+      x = copy_to_model_parallel_region(x)
+    return _Call.apply(x)
+    
+
+
+
+class GPT2MLP(_Module):
+  def __init__(self, hidden_size, hparams):
+    super(GPT2MLP, self).__init__()
+    self.hparams = hparams
+    self.hidden_size = hidden_size
+  def forward(self, input_):
+    return mlp(input_, 'mlp', self.hidden_size*4, hparams=self.hparams)
+
+
+# class GPT2ParallelMLP(_Module):
+#   def __init__(self, hidden_size, hparams, init_method=None):
+#     super(GPT2ParallelMLP, self).__init__()
+#     self.hparams = hparams
+#     # Project to 4h.
+#     self.dense_h_to_4h = ColumnParallelLinear(hidden_size, 4*hidden_size,
+#                                               gather_output=False,
+#                                               init_method=init_method)
+#     # Project back to h.
+#     self.dense_4h_to_h = RowParallelLinear(
+#         4*hidden_size,
+#         hidden_size,
+#         input_is_parallel=True,
+#         init_method=output_layer_init_method)
+    
+#   def forward(self, hidden_states):
+#     # [b, s, 4hp]
+#     intermediate_parallel = self.dense_h_to_4h(hidden_states)
+#     #intermediate_parallel = gelu(intermediate_parallel)
+
+#     # [b, s, h]
+#     output = self.dense_4h_to_h(intermediate_parallel)
+#     #output = self.dropout(output)
+#     return output
+    
+
+
+
+def ensure_divisibility(numerator, denominator):
+    """Ensure that numerator is divisible by the denominator."""
+    assert numerator % denominator == 0, '{} is not divisible by {}'.format(
+        numerator, denominator)
+
+
+def divide(numerator, denominator):
+    """Ensure that numerator is divisible by the denominator and return
+    the division value."""
+    ensure_divisibility(numerator, denominator)
+    return numerator // denominator
+
+
+def init_weight_bias_parallel(dtype, scope, input_size, output_size, axis, use_bias=True):
+  weight = []
+  bias = [] if use_bias else None
+  world_size = get_model_parallel_world_size()
+  with variable_scope(scope, dtype=dtype):
+    if world_size <= 1 and False:
+      weight = init_variable('w', [input_size, output_size], initializer=normal_initializer(dtype=dtype))
+      if use_bias:
+        bias = init_variable('b', [output_size], initializer=constant_initializer(dtype=dtype))
+    else:
+      for core in range(world_size):
+        with tf.device(device_for_tpu_core(core=core)):
+          w = init_variable('w__slice__%d_of_%d_of_%d' % (axis, core, world_size), [input_size, output_size], initializer=normal_initializer(dtype=dtype))
+          weight.append(w)
+          if use_bias and use_bias != 'full':
+            b = init_variable('b__slice__%d_of_%d_of_%d' % (axis, core, world_size), [output_size], initializer=constant_initializer(dtype=dtype))
+            bias.append(b)
+      if use_bias == 'full':
+        bias = init_variable('b', [output_size], initializer=constant_initializer(dtype=dtype))
+  return weight, bias
+
+
+class ColumnParallelLinear(_Module):
+  def __init__(self, scope, input_size, output_size, hparams, bias=True, gather_output=True,
+               #init_method=init.xavier_normal_, stride=1,
+               init_method=None, stride=1,
+               keep_master_weight_for_test=False, activation=None):
+    super(ColumnParallelLinear, self).__init__()
+
+    self.model_parallel = True
+
+    # Keep input parameters
+    self.hparams = hparams
+    self.activation = activation
+    self.input_size = input_size
+    self.output_size = output_size
+    self.gather_output = gather_output
+    # Divide the weight matrix along the last dimension.
+    world_size = get_model_parallel_world_size()
+    self.output_size_per_partition = divide(output_size, world_size)
+    dtype = hparams.dtype if hparams else tf.float32
+    # with variable_scope(scope, dtype=dtype):
+    #   self.weight = init_variable('w', [input_size, output_size], initializer=normal_initializer(dtype=dtype))
+    #   self.bias = init_variable('b', [output_size], initializer=constant_initializer(dtype=dtype))
+    self.weight, self.bias = init_weight_bias_parallel(dtype, scope, input_size, self.output_size_per_partition, axis=-1, use_bias=bias)
+
+    # Parameters.
+    # Note: torch.nn.functional.linear performs XA^T + b and as a result
+    # we allocate the transpose.
+    # self.weight = Parameter(torch.Tensor(self.output_size_per_partition,
+    #                                      self.input_size))
+      
+    # self.weight.model_parallel = True
+    # if bias:
+    #     self.bias = Parameter(torch.Tensor(self.output_size_per_partition))
+    #     self.bias.model_parallel = True
+    #     # Always initialize bias to zero.
+    #     with torch.no_grad():
+    #         self.bias.zero_()
+    # else:
+    #     self.register_parameter('bias', None)
+
+    # # Initialize weight.
+    # self.master_weight = _initialize_affine_weight(
+    #     self.weight, self.output_size, self.input_size,
+    #     self.output_size_per_partition, 0, init_method,
+    #     stride=stride, return_master_weight=keep_master_weight_for_test)
+
+    # # Initialize weight.
+    # self.master_weight = _initialize_affine_weight(
+    #     self.weight, self.output_size, self.input_size,
+    #     self.input_size_per_partition, 1, init_method,
+    #     stride=stride, return_master_weight=keep_master_weight_for_test)
+
+
+  def forward(self, input_):
+      #lhs = tf.reshape(input_, [-1, self.input_size])
+      #rhs = tf.reshape(self.w, [-1, self.output_size])
+      # if False: # noticeable slowdown https://i.imgur.com/95VAycJ.png
+      #   lhs_n = tf.split(lhs, 8, axis=1)
+      #   rhs_n = tf.split(rhs, 8, axis=0)
+      #   ops = []
+      #   for i in range(8):
+      #     with tf.device(get_core(i)):
+      #       ops.append(tf.matmul(lhs_n[i], rhs_n[i]))
+      #   W = tf.reduce_sum(ops, axis=0)
+      # else:
+      #   W = tf.matmul(lhs, rhs)
+      # Set up backprop all-reduce.
+
+      # #Set up backprop all-reduce.
+      # import pdb; pdb.set_trace()
+      # input_parallel = copy_to_model_parallel_region(input_)
+      # # Matrix multiply.
+      # output_parallel = F_linear(input_parallel, self.weight, self.bias)
+      # if self.gather_output:
+      #     # All-gather across the partitions.
+      #     output = gather_from_model_parallel_region(output_parallel)
+      # else:
+      #     output = output_parallel
+
+      # # Matrix multiply.
+      # output_parallel = F_linear(input_parallel, self.weight, self.bias)
+      # assert not self.gather_output
+      # output = output_parallel
+
+      x = input_
+      hparams = self.hparams
+      dtype = hparams.dtype if hparams else tf.float32
+      with variable_scope('mlp', dtype=dtype):
+        h0 = conv1d(x, 'c_fc', self.output_size, hparams=hparams)
+        h1 = gelu(h0)
+        import pdb; pdb.set_trace()
+        return h1
+
+      input_parallel = input_
+      weight = self.weight[self.ctx.props['index']]
+      bias = self.bias[self.ctx.props['index']]
+      #import pdb; pdb.set_trace()
+      output_parallel = tf.matmul(input_parallel, weight) + bias
+      output = output_parallel
+      if self.activation is not None:
+        output = self.activation(output)
+
+      return output
+
+
+
+class RowParallelLinear(_Module):
+    """Linear layer with row parallelism.
+
+    The linear layer is defined as Y = XA + b. A is parallelized along
+    its first dimension and X along its second dimension as:
+               -   -
+              | A_1 |
+              | .   |
+          A = | .   |        X = [X_1, ..., X_p]
+              | .   |
+              | A_p |
+               -   -
+    Arguments:
+        input_size: first dimension of matrix A.
+        output_size: second dimension of matrix A.
+        bias: If true, add bias. Note that bias is not parallelized.
+        input_is_parallel: If true, we assume that the input is already
+                           split across the GPUs and we do not split
+                           again.
+        init_method: method to initialize weights. Note that bias is always set
+                     to zero.
+        stride: For the strided linear layers.
+        keep_master_weight_for_test: This was added for testing and should be
+                                     set to False. It returns the master weights
+                                     used for initialization.
+    """
+    def __init__(self, scope, input_size, output_size, hparams, bias=True,
+                 input_is_parallel=False,
+                 # init_method=init.xavier_normal_, stride=1,
+                 init_method=None, stride=1,
+                 keep_master_weight_for_test=False):
+        super(RowParallelLinear, self).__init__()
+
+        # Keep input parameters
+        self.hparams = hparams
+        self.input_size = input_size
+        self.output_size = output_size
+        self.input_is_parallel = input_is_parallel
+        # Divide the weight matrix along the last dimension.
+        world_size = get_model_parallel_world_size()
+        self.input_size_per_partition = divide(input_size, world_size)
+
+        dtype = hparams.dtype if hparams else tf.float32
+        #self.weight, self.bias = init_weight_bias_parallel(dtype, scope, self.input_size_per_partition, output_size, axis=-2, use_bias=bias)
+        self.weight, self.bias = init_weight_bias_parallel(dtype, scope, self.input_size_per_partition, output_size, axis=-2, use_bias='full' if bias else False)
+
+        # # Parameters.
+        # # Note: torch.nn.functional.linear performs XA^T + b and as a result
+        # # we allocate the transpose.
+        # self.weight = Parameter(torch.Tensor(self.output_size,
+        #                                      self.input_size_per_partition))
+        # self.weight.model_parallel = True
+        # if bias:
+        #     self.bias = Parameter(torch.Tensor(self.output_size))
+        #     # Always initialize bias to zero.
+        #     with torch.no_grad():
+        #         self.bias.zero_()
+        # else:
+        #     self.register_parameter('bias', None)
+
+        # # Initialize weight.
+        # self.master_weight = _initialize_affine_weight(
+        #     self.weight, self.output_size, self.input_size,
+        #     self.input_size_per_partition, 1, init_method,
+        #     stride=stride, return_master_weight=keep_master_weight_for_test)
+
+    def forward(self, input_):
+        # Set up backprop all-reduce.
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            input_parallel = scatter_to_model_parallel_region(input_)
+        #import pdb; pdb.set_trace()
+        # Matrix multiply.
+        #output_parallel = F_linear(input_parallel, self.weight)
+        weight = self.weight[self.ctx.props['index']]
+        output_parallel = tf.matmul(input_parallel, weight)
+        if self.bias is not None:
+          #bias = self.bias[self.ctx.props['index']]
+          bias = self.bias
+          output_parallel = output_parallel + bias
+        # # All-reduce across all the partitions.
+        # output_ = reduce_from_model_parallel_region(output_parallel)
+        # if self.bias is not None:
+        #     output = output_ + self.bias
+        # else:
+        #     output = output_
+        # return output
+        self.ctx.reduce = True
+        return output_parallel
+
+
+    
+# def copy_to_model_parallel_region(input_):
+  # assert not isinstance(input_, list)
+  # pieces = tf.split(input_, get_model_parallel_world_size(), axis=-1)
+  # ops = []
+  # for core in range(get_model_parallel_world_size()):
+    # with tf.device(device_for_tpu_core(core=core)):
+    #   x = tf.identity(pieces[core])
+    #   ops.append(x)
+  # return ops
+
+
+def F_linear(input_parallel, weight, bias=None):
+  weight_parallel = weight
+  bias_parallel = bias
+  ops = []
+  transpose = bias is None
+  if not isinstance(input_parallel, (tuple, list)):
+    #input_parallel = [input_parallel]
+    input_parallel = tf.unstack(input_parallel, axis=0)
+  for core, input_ in enumerate(input_parallel):
+    with tf.device(device_for_tpu_core(core=core)):
+      W = weight_parallel[core]
+      op = tf.matmul(input_, W, transpose_a=transpose)
+      if bias is not None:
+        B = bias_parallel[core]
+        op += B
+      ops.append(op)
+  return ops
+
+
+class GPT2ParallelMLP(_Module):
+  def __init__(self, hidden_size, hparams, init_method=None, output_layer_init_method=None):
+    super(GPT2ParallelMLP, self).__init__()
+    self.hidden_size = hidden_size
+    self.hparams = hparams
+    # Project to 4h.
+    self.dense_h_to_4h = ColumnParallelLinear('mlp/c_fc', hidden_size, 4*hidden_size,
+                                              gather_output=False,
+                                              init_method=init_method,
+                                              hparams=hparams,
+                                              activation=None,
+                                              #activation=gelu,
+                                              )
+    # Project back to h.
+    self.dense_4h_to_h = RowParallelLinear(
+        'mlp/c_proj',
+        4*hidden_size,
+        hidden_size,
+        input_is_parallel=True,
+        init_method=output_layer_init_method,
+        hparams=hparams)
+    
+  def forward(self, hidden_states):
+    return mlp_parallel(hidden_states, 'mlp', self.hidden_size*4, hparams=self.hparams)
+    # def mlp1(x, scope, n_state, *, hparams):
+    #     dtype = hparams.dtype if hparams else tf.float32
+    #     with variable_scope(scope, dtype=dtype):
+    #         nx = x.shape[-1].value
+    #         h0 = conv1d(x, 'c_fc', n_state, hparams=hparams)
+    #         h1 = gelu(h0)
+    #         return h1
+    #         h2 = conv1d(h1, 'c_proj', nx, hparams=hparams)
+    #         h2 = dropout(h2, hparams.res_dropout)
+    #         if api.should_break: pdb.set_trace()
+    #         return h2
+    # #intermediate_parallel = [mlp1(hidden_states, 'mlp', self.hidden_size*4, hparams=self.hparams)]
+
+    # #return mlp(hidden_states, 'mlp', self.hidden_size*4, hparams=self.hparams)
+
+    # # [b, s, 4hp]
+    # intermediate_parallel = self.dense_h_to_4h(hidden_states)
+    # #intermediate_parallel = [gelu(x) for x in intermediate_parallel]
+    # #import pdb; pdb.set_trace()
+
+    # # [b, s, h]
+    # output = self.dense_4h_to_h(intermediate_parallel)
+    # #output = self.dropout(output)
+    # output = dropout(output, self.hparams.res_dropout)
+    # #import pdb; pdb.set_trace()
+    # return output
+    
+    
+

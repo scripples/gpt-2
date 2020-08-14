@@ -147,6 +147,8 @@ class HighSpeedTokenizer(object):
         pad_token
       )
     self.tokenizer = tokenizer
+    with open(vocab_path) as f:
+      self.encoder = json.load(f)
 
   def encode(self, text):
     tokens = []

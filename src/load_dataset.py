@@ -311,6 +311,8 @@ def _deliver(lines, verbose=True):
     #import pdb; pdb.set_trace()
     yield tokens
 
+import threading
+
 class TokenStreamer(object):
   def __init__(self, fp, enc, use_locking=False):
     self.fp = fp
@@ -329,22 +331,40 @@ class TokenStreamer(object):
       total = 0
       total_ = 0
       lines = []
+      threads = []
+      results = []
       with mp.Pool() as pool:
-        for i, lines in tflex_utils.for_each_lines(self.fp, verbose=verbose, **kws, count=1000):
-          now = time.time()
-          chunks = pool.map(_tokenize, lines)
-          cur = time.time()
-          elapsed += cur - now
-          elapsed_ += cur - now
-          if verbose and cur >= tick:
-            sys.stderr.write('{:,} tokens in {:,.2f}s ({:,.2f} tokens/sec)\n'.format(total, elapsed, total_/elapsed_))
-            total_ = 0
-            elapsed_ = 0
-            tick = cur + 3.0
-          for tokens in chunks:
-            yield tokens
-            total += len(tokens)
-            total_ += len(tokens)
+        for i, lines in tflex_utils.for_each_lines(self.fp, verbose=verbose, **kws, count=10000):
+          if len(threads) > 5:
+            threads[0].join()
+            chunks = results[0][0]
+            threads = threads[1:]
+            results = results[1:]
+            for tokens in chunks:
+              yield tokens
+          def thunk(i, lines, box):
+            now = time.time()
+            chunks = pool.map(_tokenize, lines)
+            cur = time.time()
+            elapsed += cur - now
+            elapsed_ += cur - now
+            if verbose and cur >= tick:
+              sys.stderr.write('{:,} tokens in {:,.2f}s ({:,.2f} tokens/sec)\n'.format(total, elapsed, total_/elapsed_))
+              total_ = 0
+              elapsed_ = 0
+              tick = cur + 3.0
+            for tokens in chunks:
+              box.append(tokens)
+              total += len(tokens)
+              total_ += len(tokens)
+            box = []
+            results.append(box)
+            threads.append(threading.Thread(target=thunk, args=(i, lines, box,), daemon=True))
+            threads[-1].start()
+          for result, thread in zip(results, threads):
+            thread.join()
+            for tokens in result[0]:
+              yield tokens
     finally:
       if self.lock:
         self.lock.release()
