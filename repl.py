@@ -281,7 +281,9 @@ os.environ['MODEL_DIR'] = 'gs://tpu-usc1/runs/gpt-2/gptrun10parallel117m'
 if 'savers' not in globals():
   savers = []
 
-def train_forever(save_every_minutes=30.0, model_dir=None):
+def train_forever(infeed=None, save_every_minutes=30.0, model_dir=None):
+  if infeed is None:
+    infeed = infeed_batch
   if model_dir is None:
     model_dir = os.environ['MODEL_DIR']
   gs = tf.train.get_global_step()
@@ -303,7 +305,7 @@ def train_forever(save_every_minutes=30.0, model_dir=None):
       thread.start()
       savers.append(thread)
       next_save = now + save_every_minutes * 60.0
-    sess.run(infeed_batch2);
+    sess.run(infeed);
     now = time.time(); results = sess.run(train2) ; elapsed = time.time() - now;
     print(results, elapsed, sess.run(tf.train.get_global_step()))
 
