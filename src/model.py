@@ -401,8 +401,6 @@ def attn_parallel(x, scope, n_state, *, past, hparams, batch_size, seq_length):
             v = tf.concat([pv, v], axis=-2)
         a0 = multihead_attn(q, k, v)
         a1 = merge_heads(a0)
-        #a2 = conv1d(a1, 'c_proj', n_state, hparams=hparams)
-        #a = [a1 for _ in range(world_size)]
         a = split_tensor_along_last_dim(a1, world_size)
         a2 = row_parallel(a, dtype, 'c_proj', n_state, n_state)
         a3 = dropout(a2, hparams.res_dropout)
