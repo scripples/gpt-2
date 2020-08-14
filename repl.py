@@ -4,7 +4,9 @@ batch_size = 1
 #factor = 4; model_name='774M' # failed?
 #factor = 2; model_name='345M'; batch_size = 4 # OOM: 11.89GB
 #factor = 2; model_name='345M'; batch_size = 2 # Ran out of memory in memory space hbm. Used 9.53G of 8.00G hbm. Exceeded hbm capacity by 1.53G.
-factor = 4; model_name='345M'; batch_size = 2 # Ran out of memory in memory space hbm. Used 9.53G of 8.00G hbm. Exceeded hbm capacity by 1.53G.
+
+factor = 4; model_name='345M'; batch_size = 2 # Ran out of memory in memory space hbm. Used 9.62G of 8.00G hbm. Exceeded hbm capacity by 1.62G.
+# https://gist.githubusercontent.com/shawwn/50ba2e6f6fcffd1e768b723af9ef7bab/raw/7aaed9673190036a6a5e50bb68fc322718a6deda/factor4_model345M_batchsize2_OOM.txt
 
 #factor = 8; model_name='1558M'
 import tflex_tpu_device_assignment; import tflex_tpu_topology; topology = tflex_tpu_topology.get_topology(res); dev = tflex_tpu_device_assignment.spatial_partition(topology, factor)

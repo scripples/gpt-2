@@ -402,6 +402,7 @@ def attn_parallel(x, scope, n_state, *, past, hparams, batch_size, seq_length):
         q0 = col_parallel(x0, dtype, 'c_attn...0_of_3', nx, n_state)
         k0 = col_parallel(x0, dtype, 'c_attn...1_of_3', nx, n_state)
         v0 = col_parallel(x0, dtype, 'c_attn...2_of_3', nx, n_state)
+        # TODO: this needs to be made paralell; running into OOMs
         q0 = tf.concat(q0, axis=-1)
         k0 = tf.concat(k0, axis=-1)
         v0 = tf.concat(v0, axis=-1)
