@@ -1160,8 +1160,11 @@ def get_model_parallel_group():
 
 def torch_distributed_get_world_size(group=None):
   #return 1
-  return 4
   #return 2
+  #return 4
+  if 'NUM_CORES' in os.environ:
+    return int(os.environ['NUM_CORES'])
+  return 1
 
 
 def get_model_parallel_group():
@@ -1186,8 +1189,11 @@ def get_model_parallel_world_size():
 
 
 def device_for_tpu_core(task=0, core=0, job="worker"):
-  #return "/job:%s/task:%d/device:TPU_REPLICATED_CORE:%d" % (job, task, core)
-  return None
+  # #return "/job:%s/task:%d/device:TPU_REPLICATED_CORE:%d" % (job, task, core)
+  # return None
+  if 'TPU_NAME' in os.environ or 'COLAB_TPU_ADDR' in os.environ:
+    return "/job:%s/task:%d/device:TPU_REPLICATED_CORE:%d" % (job, task, core)
+
 
 
 @op_scope

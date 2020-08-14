@@ -14,7 +14,7 @@ if not os.path.exists(subdir):
     os.makedirs(subdir)
 subdir = subdir.replace('\\','/') # needed for Windows
 
-for filename in ['checkpoint','encoder.json','hparams.json','model.ckpt.data-00000-of-00001', 'model.ckpt.index', 'model.ckpt.meta', 'vocab.bpe']:
+for filename in ['vocab.bpe', 'checkpoint','encoder.json','hparams.json','model.ckpt.data-00000-of-00001', 'model.ckpt.index', 'model.ckpt.meta']:
 
     r = requests.get("https://storage.googleapis.com/gpt-2/" + subdir + "/" + filename, stream=True)
 
