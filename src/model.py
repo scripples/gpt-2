@@ -258,36 +258,167 @@ def mlp(x, scope, n_state, *, hparams):
         if api.should_break: pdb.set_trace()
         return h2
 
-api.custom_grads = []
-
-
 # @op_scope
-# def mlp_parallel(x, scope, n_state, *, hparams):
-#   @tf.custom_gradient
-#   def func(x):
-#     def grad(dy, variables=None):
-#       api.custom_grads.append([dy, variables, x])
-#       #import pdb; pdb.set_trace()
-#       return dy
+# def attn_parallel(x, scope, n_state, *, past, hparams, batch_size, seq_length):
+#     assert x.shape.ndims == 2  # Should be [batch*sequence, features]
+#     assert n_state % hparams.n_head == 0
+#     *start, hidden_size = shape_list(x)
+#     num_attention_heads = hparams.n_head
+#     assert(hidden_size % num_attention_heads == 0)
 #     world_size = get_model_parallel_world_size()
+#     size_per_head = hidden_size // num_attention_heads
+#     ensure_divisibility(size_per_head, world_size)
+#     size_per_head //= world_size
+
+#     if past is not None:
+#         assert past.shape.ndims == 5  # Should be [batch, 2, heads, sequence, features], where 2 is [k, v]
+
+#     @op_scope
+#     def split_heads(x):
+#         # From [batch, sequence, features] to [batch, heads, sequence, features]
+#         x = tf.reshape(x, [batch_size, seq_length, num_attention_heads, size_per_head])
+#         x = split_states(x, hparams.n_head)
+#         return tf.transpose(x, [0, 2, 1, 3])
+
+#     @op_scope
+#     def merge_heads(x):
+#         # Reverse of split_heads
+#         x = tf.transpose(x, [0, 2, 1, 3])
+#         x = merge_states(x)
+#         x = tf.reshape(x, [batch_size * seq_length, num_attention_heads * size_per_head])
+#         return x
+
+#     @op_scope
+#     def mask_attn_weights(w):
+#         # w has shape [batch, heads, dst_sequence, src_sequence], where information flows from src to dst.
+#         _, _, nd, ns = shape_list(w)
+#         b = attention_mask(nd, ns, dtype=w.dtype)
+#         b = tf.reshape(b, [1, 1, nd, ns])
+#         w = w*b - tf.cast(65500 if w.dtype == tf.float16 else 1e10, w.dtype)*(1-b)
+#         return w
+
+#     @op_scope
+#     def multihead_attn(q, k, v):
+#         # q, k, v have shape [batch, heads, sequence, features]
+#         w = tf.matmul(q, k, transpose_b=True)
+#         w = w * tf.rsqrt(tf.cast(v.shape[-1].value, w.dtype))
+
+#         w = mask_attn_weights(w)
+#         w = softmax(w)
+#         w = dropout(w, hparams.attn_dropout)
+#         a = tf.matmul(w, v)
+#         return a
+
 #     dtype = hparams.dtype if hparams else tf.float32
 #     with variable_scope(scope, dtype=dtype):
 #         nx = x.shape[-1].value
-#         ensure_divisibility(n_state, world_size)
-#         ensure_divisibility(nx, world_size)
-#         #x0 = clone_tensor_to_each_device(x)
 #         x0 = [x for _ in range(world_size)]
-#         w0, b0 = init_weight_bias_parallel(dtype, 'c_fc', nx, n_state // world_size, use_bias=True)
-#         h0 = [tf.matmul(x, w) + b for x, w, b in zip(x0, w0, b0)]
-#         h1 = [gelu(h) for h in h0]
-#         w2, b2 = init_weight_bias_parallel(dtype, 'c_proj', n_state // world_size, nx, use_bias='full')
-#         h2 = [tf.matmul(h, w) for h, w in zip(h1, w2)]
-#         h = tf.reduce_sum(tf.stack(h2), axis=0)
-#         h = h + b2
-#         h = dropout(h, hparams.res_dropout)
-#         if api.should_break: pdb.set_trace()
-#     return h, grad
-#   return func(x)
+#         #c = conv1d(x, 'c_attn', n_state*3, hparams=hparams)
+#         ensure_divisibility(n_state*3, world_size)
+#         c_w0, c_b0 = init_weight_bias_parallel(dtype, 'c_attn', nx, n_state*3 // world_size, axis=-1, use_bias=True)
+#         p_w0, p_b0 = init_weight_bias_parallel(dtype, 'c_proj', n_state*3 // world_size, axis=-1, use_bias=True)
+#         #h0 = [tf.matmul(x, w, name='c_attn_h0__slice__%d_of_%d' % (i, world_size)) + b for i, x, w, b in zip(range(world_size), x0, c_w0, c_b0)]
+#         ops = []
+#         present = []
+#         for i, x, w, b in zip(range(world_size), x0, c_w0, c_b0):
+#           with tf.device(device_for_tpu_core(core=i)):
+#             c = tf.matmul(x, w, name='c_attn__slice__%d_of_%d' % (i, world_size)) + b
+#             q, k, v = map(split_heads, tf.split(c, 3, axis=-1))
+#             present.append(tf.stack([k, v], axis=1))
+#             if past is not None:
+#                 pk, pv = tf.unstack(past, axis=1)
+#                 k = tf.concat([pk, k], axis=-2)
+#                 v = tf.concat([pv, v], axis=-2)
+#             import pdb; pdb.set_trace()
+#             a = multihead_attn(q, k, v)
+#             a = merge_heads(a)
+#             a = conv1d(a, 'c_proj', n_state, hparams=hparams)
+#             a = dropout(a, hparams.res_dropout)
+#             ops.append(a)
+#         import pdb; pdb.set_trace()
+#         return ops, present
+
+
+
+
+@op_scope
+def attn_parallel(x, scope, n_state, *, past, hparams, batch_size, seq_length):
+    assert x.shape.ndims == 2  # Should be [batch*sequence, features]
+    assert n_state % hparams.n_head == 0
+    *start, hidden_size = shape_list(x)
+    num_attention_heads = hparams.n_head
+    assert(hidden_size % num_attention_heads == 0)
+    size_per_head = hidden_size // num_attention_heads
+    world_size = get_model_parallel_world_size()
+
+    if past is not None:
+        assert past.shape.ndims == 5  # Should be [batch, 2, heads, sequence, features], where 2 is [k, v]
+
+    @op_scope
+    def split_heads(x):
+        # From [batch, sequence, features] to [batch, heads, sequence, features]
+        x = tf.reshape(x, [batch_size, seq_length, num_attention_heads, size_per_head])
+        x = split_states(x, hparams.n_head)
+        return tf.transpose(x, [0, 2, 1, 3])
+
+    @op_scope
+    def merge_heads(x):
+        # Reverse of split_heads
+        x = tf.transpose(x, [0, 2, 1, 3])
+        x = merge_states(x)
+        x = tf.reshape(x, [batch_size * seq_length, num_attention_heads * size_per_head])
+        return x
+
+    @op_scope
+    def mask_attn_weights(w):
+        # w has shape [batch, heads, dst_sequence, src_sequence], where information flows from src to dst.
+        _, _, nd, ns = shape_list(w)
+        b = attention_mask(nd, ns, dtype=w.dtype)
+        b = tf.reshape(b, [1, 1, nd, ns])
+        w = w*b - tf.cast(65500 if w.dtype == tf.float16 else 1e10, w.dtype)*(1-b)
+        return w
+
+    @op_scope
+    def multihead_attn(q, k, v):
+        # q, k, v have shape [batch, heads, sequence, features]
+        w = tf.matmul(q, k, transpose_b=True)
+        w = w * tf.rsqrt(tf.cast(v.shape[-1].value, w.dtype))
+
+        w = mask_attn_weights(w)
+        w = softmax(w)
+        w = dropout(w, hparams.attn_dropout)
+        a = tf.matmul(w, v)
+        return a
+
+    dtype = hparams.dtype if hparams else tf.float32
+    with variable_scope(scope, dtype=dtype):
+        c = conv1d(x, 'c_attn', n_state*3, hparams=hparams)
+        q, k, v = map(split_heads, tf.split(c, 3, axis=-1))
+        present = tf.stack([k, v], axis=1)
+        if past is not None:
+            pk, pv = tf.unstack(past, axis=1)
+            k = tf.concat([pk, k], axis=-2)
+            v = tf.concat([pv, v], axis=-2)
+        a0 = multihead_attn(q, k, v)
+        a1 = merge_heads(a0)
+        #a2 = conv1d(a1, 'c_proj', n_state, hparams=hparams)
+        #a = [a1 for _ in range(world_size)]
+        a = split_tensor_along_last_dim(a1, world_size)
+        a2 = row_parallel(a, dtype, 'c_proj', n_state, n_state)
+        a3 = dropout(a2, hparams.res_dropout)
+        return a3, present
+
+
+def row_parallel(h, dtype, scope, input_size, output_size):
+  world_size = get_model_parallel_world_size()
+  ensure_divisibility(input_size, world_size)
+  input_size //= world_size
+  w, b = init_weight_bias_parallel(dtype, scope, input_size, output_size, axis=-2, use_bias='full')
+  h1 = [tf.matmul(h, w, name='h2__slice__%d_of_%d' % (i, world_size)) for i, h, w in zip(range(world_size), h, w)]
+  h2 = tf.reduce_sum(tf.stack(h1, name='h1_stack'), axis=0, name='h_reduce_sum')
+  h3 = tf.add(h2, b, name='h_add_bias')
+  return h3
+
 
 @op_scope
 def mlp_parallel(x, scope, n_state, *, hparams):
@@ -307,10 +438,11 @@ def mlp_parallel(x, scope, n_state, *, hparams):
         w0, b0 = init_weight_bias_parallel(dtype, 'c_fc', nx, n_state // world_size, axis=-1, use_bias=True)
         h0 = [tf.matmul(x, w, name='h0__slice__%d_of_%d' % (i, world_size)) + b for i, x, w, b in zip(range(world_size), x0, w0, b0)]
         h1 = [gelu(h) for h in h0]
-        w2, b2 = init_weight_bias_parallel(dtype, 'c_proj', n_state // world_size, nx, axis=-2, use_bias='full')
-        h2 = [tf.matmul(h, w, name='h2__slice__%d_of_%d' % (i, world_size)) for i, h, w in zip(range(world_size), h1, w2)]
-        h = tf.reduce_sum(tf.stack(h2, name='h2_stack'), axis=0, name='h_reduce_sum')
-        h = tf.add(h, b2, name='h_add_bias')
+        # w2, b2 = init_weight_bias_parallel(dtype, 'c_proj', n_state // world_size, nx, axis=-2, use_bias='full')
+        # h2 = [tf.matmul(h, w, name='h2__slice__%d_of_%d' % (i, world_size)) for i, h, w in zip(range(world_size), h1, w2)]
+        # h = tf.reduce_sum(tf.stack(h2, name='h2_stack'), axis=0, name='h_reduce_sum')
+        # h = tf.add(h, b2, name='h_add_bias')
+        h = row_parallel(h1, dtype, 'c_proj', n_state, nx)
         h = dropout(h, hparams.res_dropout)
         if api.should_break: pdb.set_trace()
     return h, grad
@@ -330,7 +462,8 @@ def block(x, scope, *, past, hparams, attn, **attn_kws):
     with variable_scope(scope, dtype=dtype):
         nx = x.shape[-1].value
         x0 = norm(x, 'ln_1', hparams=hparams)
-        a, present = attn(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
+        #a, present = attn(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
+        a, present = attn_parallel(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
         x = x + a
         x1 = norm(x, 'ln_2', hparams=hparams)
         #m = mlp(x1, 'mlp', nx*4, hparams=hparams)

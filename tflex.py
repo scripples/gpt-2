@@ -285,6 +285,8 @@ def variable_name(variable):
     return None
   name = variable.name
   name = name.split('__slice__')[0]
+  if ':' not in name:
+    name = name + ':' + variable.name.split(':')[-1]
   if re.match(r'core[0-9]+/', name):
     name = name.split('/', 1)[-1]
   return name
