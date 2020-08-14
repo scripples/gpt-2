@@ -1,6 +1,11 @@
+batch_size = 1
 #factor = int(os.environ['NUM_CORES'])
 #factor = 2; model_name='117M'
-factor = 4; model_name='774M'
+#factor = 4; model_name='774M' # failed?
+#factor = 2; model_name='345M'; batch_size = 4 # OOM: 11.89GB
+#factor = 2; model_name='345M'; batch_size = 2 # Ran out of memory in memory space hbm. Used 9.53G of 8.00G hbm. Exceeded hbm capacity by 1.53G.
+factor = 4; model_name='345M'; batch_size = 2 # Ran out of memory in memory space hbm. Used 9.53G of 8.00G hbm. Exceeded hbm capacity by 1.53G.
+
 #factor = 8; model_name='1558M'
 import tflex_tpu_device_assignment; import tflex_tpu_topology; topology = tflex_tpu_topology.get_topology(res); dev = tflex_tpu_device_assignment.spatial_partition(topology, factor)
 
@@ -23,7 +28,7 @@ from tensorflow.contrib.tpu.python.tpu import tpu_function
 args = model.Context()
 args.only_train_transformer_layers = False
 args.sample_length = 48
-args.batch_size = 1
+args.batch_size = batch_size
 args.temperature = 0.8
 args.top_k = 40
 args.top_p = 0.0
@@ -34,7 +39,7 @@ args.iterations = 20
 restore_from=None
 seed=None
 nsamples=0
-batch_size=1
+batch_size=batch_size
 length=None
 temperature=0.8
 top_k=40
@@ -125,8 +130,8 @@ def sample_text(x, amount, batch_size=None):
 
 import tputil
 
-#toks = tputil.tf_file_tok16('gs://tpu-usc1/datasets/dota2-ftfy.txt.tok16')
-toks = tputil.tf_file_tok16('gs://tpu-usc1/datasets/openwebtext-3b.tok16')
+toks = tputil.tf_file_tok16('gs://tpu-usc1/datasets/dota2-ftfy.txt.tok16')
+#toks = tputil.tf_file_tok16('gs://tpu-usc1/datasets/openwebtext-3b.tok16')
 
 sess.run(toks.initializer)
 
@@ -254,15 +259,51 @@ def tpu_loop():
 #(compile_train, train) = tpu_ops.split_compile_and_shard(train_op, outputs_from_all_shards=True, num_shards=dev.num_replicas, inputs=[context], device_assignment=dev)
 (compile_train2, train2) = tpu_ops.split_compile_and_shard(tpu_loop, outputs_from_all_shards=True, num_shards=dev.num_replicas, inputs=[], device_assignment=dev)
 
+sess.run(tf.global_variables_initializer())
+#sess.run(tf.local_variables_initializer())
+sess.run([x.initializer for x in sess.graph.get_collection_ref('variables')])
+
 #sess.run(compile_train2)
 import time; now = time.time(); results = sess.run(compile_train2) ; elapsed = time.time() - now; results, elapsed
 
-sess.run(tf.global_variables_initializer())
-sess.run(tf.local_variables_initializer())
-sess.run([x.initializer for x in sess.graph.get_collection_ref('variables')])
+all_vars = [v for v in tf.trainable_variables() if 'model' in v.name]
+train_vars = [v for v in all_vars if '/h' in v.name] if args.only_train_transformer_layers else all_vars
 
+saver = tf.train.Saver(var_list=train_vars)
 
-while True: sess.run(infeed_batch2); import time; now = time.time(); results = sess.run(train2) ; elapsed = time.time() - now; results, elapsed, sess.run(tf.train.get_global_step())
+import time
+import threading
+
+os.environ['MODEL_DIR'] = 'gs://tpu-usc1/runs/gpt-2/gptrun10parallel117m'
+
+if 'savers' not in globals():
+  savers = []
+
+def train_forever(save_every_minutes=30.0, model_dir=None):
+  if model_dir is None:
+    model_dir = os.environ['MODEL_DIR']
+  gs = tf.train.get_global_step()
+  start = time.time()
+  #next_save = start + save_every_minutes * 60.0
+  next_save = start
+  while True:
+    now = time.time()
+    if now >= next_save:
+      global_step = sess.run(gs)
+      def thunk():
+        path = os.path.join(model_dir, 'model')
+        print('Saving to {}-{}'.format(path, global_step))
+        saving = time.time()
+        saver.save(sess, path, global_step=global_step)
+        elapsed = time.time() - saving
+        print('Saved to {}-{} in {:.2f}sec'.format(path, global_step, elapsed))
+      thread = threading.Thread(target=thunk, daemon=True)
+      thread.start()
+      savers.append(thread)
+      next_save = now + save_every_minutes * 60.0
+    sess.run(infeed_batch2);
+    now = time.time(); results = sess.run(train2) ; elapsed = time.time() - now;
+    print(results, elapsed, sess.run(tf.train.get_global_step()))
 
 iterations_var.load(1)
 
