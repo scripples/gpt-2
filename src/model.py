@@ -479,6 +479,29 @@ def mlp_parallel(x, scope, n_state, *, hparams):
   return func(x)[0]
 
 
+import highway as hw
+
+
+@op_scope
+def mlp_highway(x, scope, n_state=None, *, hparams):
+  highway_size = hw.get_highway_size()
+  dtype = hparams.dtype if hparams else tf.float32
+  with variable_scope(scope, dtype=dtype):
+    nx = hw.static_shape(x)[-1].value
+    if n_state is None:
+      n_state = nx * 4
+    ensure_divisibility(n_state, highway_size)
+    ensure_divisibility(nx, highway_size)
+    x0 = hw.identity(x)
+    h0 = hw.col_parallel(x0, dtype, 'c_fc', nx, n_state)
+    h1 = hw.pmap(gelu, h0)
+    h2 = hw.row_parallel(h1, dtype, 'c_proj', n_state, nx)
+    h3 = hw.pmap(dropout, h2, pdrop=hparams.res_dropout)
+  return h3
+
+
+
+
 @op_scope
 def dropout(x, pdrop=0.1, train=True):
     if train and pdrop > 0:
@@ -494,14 +517,21 @@ def block(x, scope, *, past, hparams, attn, **attn_kws):
         x0 = norm(x, 'ln_1', hparams=hparams)
         #a, present = attn(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
         a, present = attn_parallel(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
-        x = x + a
-        x1 = norm(x, 'ln_2', hparams=hparams)
+        #x = x + a
+        x = hw.identity(x)
+        a = hw.identity(a)
+        x = hw.pmap(tf.add, x, a)
+        #x1 = norm(x, 'ln_2', hparams=hparams)
+        x1 = hw.pmap(norm, hw.identity(x), 'ln_2', hparams=hparams)
         #m = mlp(x1, 'mlp', nx*4, hparams=hparams)
-        m = mlp_parallel(x1, 'mlp', nx*4, hparams=hparams)
+        #m = mlp_parallel(x1, 'mlp', nx*4, hparams=hparams)
+        m = mlp_highway(x1, 'mlp', nx*4, hparams=hparams)
         #m = GPT2MLP(hidden_size=nx, hparams=hparams)(x1)
         #m = GPT2ParallelMLP(hidden_size=nx, hparams=hparams)(x1)
         #import pdb; pdb.set_trace()
-        x = x + m
+        #x = x + m
+        x = hw.pmap(tf.add, x, m)
+        x = x[0]
         return x, present
 
 @op_scope
