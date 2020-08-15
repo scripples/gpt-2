@@ -119,11 +119,6 @@ identity = functools.partial(pmap, tf.identity)
 
 
 @op_scope
-def preduce(args, op=tf.add_n):
-  return op(identity(args))
-
-
-@op_scope
 def static_shape(h):
   return at(h).shape
 
