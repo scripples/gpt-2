@@ -87,6 +87,13 @@ def get_variable(name):
             return x
 
 @op_scope
+def init_variable(name, shape, initializer):
+  v = get_variable(name)
+  if v is not None:
+    return v
+  return tf.get_variable(name, shape=shape, initializer=initializer, use_resource=True)
+
+@op_scope
 def shape_list(x):
     """Deal with dynamic shape in tensorflow cleanly."""
     static = x.shape.as_list()
@@ -137,13 +144,6 @@ def normal_initializer(dtype, stddev=0.02):
 @op_scope
 def constant_initializer(dtype, value=0):
   return tf.constant_initializer(value=value, dtype=dtype)
-
-@op_scope
-def init_variable(name, shape, initializer):
-  v = get_variable(name)
-  if v is not None:
-    return v
-  return tf.get_variable(name, shape=shape, initializer=initializer, use_resource=True)
 
 @op_scope
 def conv1d(x, scope, nf, *, hparams=None):
