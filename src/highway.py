@@ -55,7 +55,7 @@ def switch_lane(lane):
   if lane >= highway_size:
     raise ValueError("Tried to switch lane to {}, but highway size is {}".format(lane, highway_size))
   with _current_lane.overlay(lane):
-    with tf.device(device_for_tpu_core()):
+    with tf.device(device_for_core()):
       with tf.name_scope('lane__%d_of_%d' % (lane, highway_size)):
         yield
 
@@ -76,13 +76,19 @@ def get_highway_size():
 
 
 
-def device_for_tpu_core(task=0, core=None, job="worker"):
+def device_for_core(task=0, core=None, job=None):
   if core is None:
     core = get_current_lane()
   # #return "/job:%s/task:%d/device:TPU_REPLICATED_CORE:%d" % (job, task, core)
   # return None
   if 'TPU_NAME' in os.environ or 'COLAB_TPU_ADDR' in os.environ: # TODO: check whether current session has TPU devices
+    if job is None:
+      job = "worker"
     return "/job:%s/task:%d/device:TPU_REPLICATED_CORE:%d" % (job, task, core)
+  elif 'NUM_CORES' in os.environ:
+    if job is None:
+      job = "localhost"
+    return "/job:%s/task:%d/device:CPU:%d" % (job, task, core)
 
 
 def alist(x):
@@ -201,7 +207,7 @@ def init_weight_bias_parallel(dtype, scope, shape, axis, use_bias=True, weight_n
 #         bias = init_variable(bias_name, [output_size], initializer=constant_initializer(dtype=dtype))
 #     else:
 #       for core in range(world_size):
-#         with tf.device(device_for_tpu_core(core=core)):
+#         with tf.device(device_for_core(core=core)):
 #           w = init_variable(weight_name + '__slice__%d_of_%d_of_%d' % (axis, core, world_size), [input_size, output_size], initializer=normal_initializer(dtype=dtype))
 #           weight.append(w)
 #           if use_bias and use_bias != 'full':
