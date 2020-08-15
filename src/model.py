@@ -129,13 +129,17 @@ def split_states(x, n):
     """Reshape the last dimension of x into [n, x.shape[-1]/n]."""
     *start, u, v = shape_list(x)
     m = u * v
-    return tf.reshape(x, start + [n, m//n])
+    shape = start + [n, m//n]
+    #return tf.reshape(x, shape)
+    assert shape_list(x) == shape
+    return x
 
 @op_scope
 def merge_states(x):
     """Smash the last two dimensions of x into a single dimension."""
     *start, a, b = shape_list(x)
-    return tf.reshape(x, start + [a*b])
+    shape = start + [a*b]
+    return tf.reshape(x, shape)
 
 @op_scope
 def normal_initializer(dtype, stddev=0.02):
@@ -198,14 +202,14 @@ def attn(x, scope, n_state, *, past, hparams, batch_size, seq_length):
     def split_heads(x):
         # From [batch, sequence, features] to [batch, heads, sequence, features]
         x = tf.reshape(x, [batch_size, seq_length, num_attention_heads, size_per_head])
-        x = split_states(x, hparams.n_head)
+        #x = split_states(x, hparams.n_head)
         return tf.transpose(x, [0, 2, 1, 3])
 
     @op_scope
     def merge_heads(x):
         # Reverse of split_heads
         x = tf.transpose(x, [0, 2, 1, 3])
-        x = merge_states(x)
+        #x = merge_states(x)
         x = tf.reshape(x, [batch_size * seq_length, num_attention_heads * size_per_head])
         return x
 
@@ -358,14 +362,14 @@ def attn_parallel(x, scope, n_state, *, past, hparams, batch_size, seq_length):
     def split_heads(x):
         # From [batch, sequence, features] to [batch, heads, sequence, features]
         x = tf.reshape(x, [batch_size, seq_length, num_attention_heads, size_per_head])
-        x = split_states(x, hparams.n_head)
+        #x = split_states(x, hparams.n_head)
         return tf.transpose(x, [0, 2, 1, 3])
 
     @op_scope
     def merge_heads(x):
         # Reverse of split_heads
         x = tf.transpose(x, [0, 2, 1, 3])
-        x = merge_states(x)
+        #x = merge_states(x)
         x = tf.reshape(x, [batch_size * seq_length, num_attention_heads * size_per_head])
         return x
 
@@ -499,7 +503,140 @@ def mlp_highway(x, scope, n_state=None, *, hparams):
     h3 = hw.pmap(dropout, h2, pdrop=hparams.res_dropout)
   return h3
 
+@op_scope
+def attn_highway(x, scope, n_state, *, past, hparams, batch_size, seq_length):
+    assert x.shape.ndims == 2  # Should be [batch*sequence, features]
+    assert n_state % hparams.n_head == 0
+    *start, hidden_size = shape_list(x)
+    num_attention_heads = hparams.n_head
+    assert(hidden_size % num_attention_heads == 0)
+    size_per_head = hidden_size // num_attention_heads
+    world_size = get_model_parallel_world_size()
 
+    if past is not None:
+        assert past.shape.ndims == 5  # Should be [batch, 2, heads, sequence, features], where 2 is [k, v]
+
+    @op_scope
+    def split_heads(x):
+        # From [batch, sequence, features] to [batch, heads, sequence, features]
+        x = tf.reshape(x, [batch_size, seq_length, num_attention_heads, size_per_head])
+        #x = split_states(x, hparams.n_head)
+        return tf.transpose(x, [0, 2, 1, 3])
+
+    @op_scope
+    def merge_heads(x):
+        # Reverse of split_heads
+        x = tf.transpose(x, [0, 2, 1, 3])
+        #x = merge_states(x)
+        x = tf.reshape(x, [batch_size * seq_length, num_attention_heads * size_per_head])
+        return x
+
+    @op_scope
+    def mask_attn_weights(w):
+        # w has shape [batch, heads, dst_sequence, src_sequence], where information flows from src to dst.
+        _, _, nd, ns = shape_list(w)
+        b = attention_mask(nd, ns, dtype=w.dtype)
+        b = tf.reshape(b, [1, 1, nd, ns])
+        w = w*b - tf.cast(65500 if w.dtype == tf.float16 else 1e10, w.dtype)*(1-b)
+        return w
+
+    @op_scope
+    def multihead_attn(q, k, v):
+        # q, k, v have shape [batch, heads, sequence, features]
+        w = tf.matmul(q, k, transpose_b=True)
+        w = w * tf.rsqrt(tf.cast(v.shape[-1].value, w.dtype))
+
+        w = mask_attn_weights(w)
+        w = softmax(w)
+        w = dropout(w, hparams.attn_dropout)
+        a = tf.matmul(w, v)
+        return a
+
+    dtype = hparams.dtype if hparams else tf.float32
+    with variable_scope(scope, dtype=dtype):
+        nx = x.shape[-1].value
+        #c = conv1d(x, 'c_attn', n_state*3, hparams=hparams)
+        #q0, k0, v0 = tf.split(c, 3, axis=-1)
+        #q00 = conv1d(x, 'c_attn...0_of_3', n_state, hparams=hparams)
+        #k00 = conv1d(x, 'c_attn...1_of_3', n_state, hparams=hparams)
+        #v00 = conv1d(x, 'c_attn...2_of_3', n_state, hparams=hparams)
+        #x0 = [x for _ in range(world_size)]
+        x0 = hw.identity(x)
+        #q00 = col_parallel(x0, dtype, 'c_attn...0_of_3', nx, n_state)
+        q0 = hw.col_parallel(x0, dtype, 'c_attn...0_of_3', nx, n_state) # [1, 192] x 4
+        k0 = hw.col_parallel(x0, dtype, 'c_attn...1_of_3', nx, n_state) # [1, 192] x 4
+        v0 = hw.col_parallel(x0, dtype, 'c_attn...2_of_3', nx, n_state) # [1, 192] x 4
+        @op_scope
+        def split_heads(x):
+          #x1 = tf.reshape(x, [batch_size, seq_length, num_attention_heads, divide(size_per_head, world_size)])
+          x1 = tf.reshape(x, [batch_size, seq_length, divide(num_attention_heads, world_size), size_per_head])
+          x2 = tf.transpose(x1, [0, 2, 1, 3])
+          return x2
+        @op_scope
+        def merge_heads(x):
+            x = tf.transpose(x, [0, 2, 1, 3])
+            x = tf.reshape(x, [batch_size * seq_length, divide(num_attention_heads * size_per_head, world_size)])
+            return x
+        # q1 = hw.pmap(split_heads, q0) # [1, 12, 1, 16] x 4
+        # k1 = hw.pmap(split_heads, k0) # [1, 12, 1, 16] x 4
+        # v1 = hw.pmap(split_heads, v0) # [1, 12, 1, 16] x 4
+        q1 = hw.pmap(split_heads, q0) # [1, 3, 1, 64] x 4
+        k1 = hw.pmap(split_heads, k0) # [1, 3, 1, 64] x 4
+        v1 = hw.pmap(split_heads, v0) # [1, 3, 1, 64] x 4
+        #q = tf.concat(q1, axis=-1) # [1, 12, 1, 64]
+        #k = tf.concat(k1, axis=-1) # [1, 12, 1, 64]
+        #v = tf.concat(v1, axis=-1) # [1, 12, 1, 64]
+        # q = split_heads(q1)
+        # k = split_heads(k1)
+        # v = split_heads(v1)
+        #q, k, v = map(split_heads, [q1, k1, v1])
+        #if seq_length > 0:
+        #  import pdb; pdb.set_trace()
+        #import pdb; pdb.set_trace()
+        #if api.should_break: pdb.set_trace()
+        #present = tf.stack([k, v], axis=1) # [1, 2, 12, 1, 64]
+        #present1 = hw.pmap(lambda k, v: tf.stack([k, v], axis=1), k1, v1) # [1, 2, 12, 1, 16] x 4
+        #present = hw.pmap(lambda: tf.concat(present1, axis=-1))
+        present1 = hw.pmap(lambda k, v: tf.stack([k, v], axis=1), k1, v1) # [1, 2, 3, 1, 64] x 4
+        present = hw.pmap(lambda: tf.concat(present1, axis=-3)) # [1, 2, 12, 1, 64] x 4
+        #present = present1
+        if past is not None:
+            #import pdb; pdb.set_trace() # TODO
+            #pk, pv = tf.unstack(past, axis=1)
+            #k = tf.concat([pk, k], axis=-2)
+            #v = tf.concat([pv, v], axis=-2)
+            #past2 = split_tensor_along_last_dim(past, world_size)
+            #past2 = tf.split(past, world_size, axis=-3)
+            #import pdb; pdb.set_trace()
+            past1 = hw.identity(past)
+            def fork(past, k, v):
+              # past = [1, 2, 12, 1, 64]
+              pk, pv = tf.unstack(past, axis=1) # [1, 12, 1, 64] x 2
+              pk1 = hw.at(tf.split(pk, world_size, axis=-3)) # [1, 3, 1, 64]
+              pv1 = hw.at(tf.split(pv, world_size, axis=-3)) # [1, 3, 1, 64]
+              #pk1 = pk
+              #pv1 = pv
+              k = tf.concat([pk1, k], axis=-2) # [1, 3, 2, 64]
+              v = tf.concat([pv1, v], axis=-2) # [1, 3, 2, 64]
+              return k, v
+            result = hw.pmap(fork, past1, k1, v1)
+            k2, v2 = zip(*result)
+            k1, v1 = list(k2), list(v2)
+            #k = tf.concat([pk, k], axis=-2)
+            #v = tf.concat([pv, v], axis=-2)
+            #past = hw.identity(past)
+        #a0 = multihead_attn(q, k, v)
+        #a0 = hw.pmap(multihead_attn, q1, k1, v1) # [1, 12, 1, 16] x 4
+        a0 = hw.pmap(multihead_attn, q1, k1, v1) # [1, 3, 1, 64] x 4
+        #a1 = merge_heads(a0)
+        #a = split_tensor_along_last_dim(a1, world_size)
+        a = hw.pmap(merge_heads, a0) # [1, 192] x 4
+        a2 = hw.row_parallel(a, dtype, 'c_proj', n_state, n_state)
+        #a3 = dropout(a2, hparams.res_dropout)
+        a3 = hw.pmap(dropout, a2, hparams.res_dropout)
+        a3 = a3[0]
+        present = present[0]
+        return a3, present
 
 
 @op_scope
@@ -516,7 +653,8 @@ def block(x, scope, *, past, hparams, attn, **attn_kws):
         nx = x.shape[-1].value
         x0 = norm(x, 'ln_1', hparams=hparams)
         #a, present = attn(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
-        a, present = attn_parallel(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
+        a, present = attn_highway(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
+        #a, present = attn_parallel(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
         #x = x + a
         x = hw.identity(x)
         a = hw.identity(a)
@@ -537,6 +675,8 @@ def block(x, scope, *, past, hparams, attn, **attn_kws):
 @op_scope
 def past_shape(*, hparams, batch_size=None, sequence=None):
     return [batch_size, hparams.n_layer, 2, hparams.n_head, sequence, hparams.n_embd // hparams.n_head]
+    #world_size = get_model_parallel_world_size()
+    #return [batch_size, hparams.n_layer, 2, divide(hparams.n_head, world_size), sequence, hparams.n_embd // hparams.n_head]
 
 @op_scope
 def expand_tile(value, size):

@@ -127,7 +127,7 @@ def col_parallel(h, dtype, scope, input_size, output_size):
   assert alist(h)
   highway_size = get_highway_size()
   output_size_per_partition = divide(output_size, highway_size)
-  w, b = init_weight_bias_parallel(dtype, scope, [output_size_per_partition, input_size], axis=-1, use_bias=True)
+  w, b = init_weight_bias_parallel(dtype, scope, [input_size, output_size_per_partition], axis=-1, use_bias=True)
   # h0 = []
   # for lane in swerve_across_highway():
   #   x = tf.matmul(at(h), at(w))
@@ -145,7 +145,7 @@ def row_parallel(h, dtype, scope, input_size, output_size):
   assert alist(h)
   highway_size = get_highway_size()
   input_size_per_partition = divide(input_size, highway_size)
-  w, b = init_weight_bias_parallel(dtype, scope, [output_size, input_size_per_partition], axis=-2, use_bias='full')
+  w, b = init_weight_bias_parallel(dtype, scope, [input_size_per_partition, output_size], axis=-2, use_bias='full')
   h1 = pmap(tf.matmul, h, w)
   def fork(b):
     #h2 = tf.stack(h1, name='row_parallel_stack')
@@ -183,10 +183,10 @@ def init_weight_bias_parallel(dtype, scope, shape, axis, use_bias=True, weight_n
         w = init_variable(weight_name + '__slice__%d_of_%d_of_%d' % (axis, lane, highway_size), shape, initializer=normal_initializer(dtype=dtype))
         weight.append(w)
         if use_bias and use_bias != 'full':
-          b = init_variable(bias_name + '__slice__%d_of_%d_of_%d' % (axis, lane, highway_size), shape[0], initializer=constant_initializer(dtype=dtype))
+          b = init_variable(bias_name + '__slice__%d_of_%d_of_%d' % (axis, lane, highway_size), shape[-1], initializer=constant_initializer(dtype=dtype))
           bias.append(b)
       if use_bias == 'full':
-        bias = init_variable(bias_name, shape[0], initializer=constant_initializer(dtype=dtype))
+        bias = init_variable(bias_name, shape[-1], initializer=constant_initializer(dtype=dtype))
   return weight, bias
 
 

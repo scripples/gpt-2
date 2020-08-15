@@ -190,6 +190,7 @@ def gradients(ys, xs, grad_ys=None, checkpoints='collection', **kwargs):
     # disconnect dependencies between checkpointed tensors
     checkpoints_disconnected = {}
     for x in checkpoints:
+        # TODO: colocate with x.op?
         if x.op and x.op.name is not None:
             grad_node = tf.stop_gradient(x, name=x.op.name+"_sg")
         else:
@@ -257,6 +258,7 @@ def gradients(ys, xs, grad_ys=None, checkpoints='collection', **kwargs):
           copied_sgv, info = ge.copy_with_input_replacements(ge.sgv(ops_to_copy), {})
         for origin_op, op in info._transformed_ops.items():
             op._set_device(origin_op.node_def.device)
+            # TODO: set tpu_replicated attr?
         copied_ops = info._transformed_ops.values()
         debug_print("Copied %s to %s", ops_to_copy, copied_ops)
         ge.reroute_ts(checkpoints_disconnected_other, checkpoints_other, can_modify=copied_ops)
