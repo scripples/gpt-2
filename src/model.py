@@ -505,9 +505,10 @@ def mlp_highway(x, scope, n_state=None, *, hparams):
 
 @op_scope
 def attn_highway(x, scope, n_state, *, past, hparams, batch_size, seq_length):
-    assert x.shape.ndims == 2  # Should be [batch*sequence, features]
+    assert hw.alist(x)
+    assert hw.static_shape(x).ndims == 2  # Should be [batch*sequence, features]
     assert n_state % hparams.n_head == 0
-    *start, hidden_size = shape_list(x)
+    *start, hidden_size = shape_list(x[0])
     num_attention_heads = hparams.n_head
     assert(hidden_size % num_attention_heads == 0)
     size_per_head = hidden_size // num_attention_heads
@@ -554,7 +555,7 @@ def attn_highway(x, scope, n_state, *, past, hparams, batch_size, seq_length):
 
     dtype = hparams.dtype if hparams else tf.float32
     with variable_scope(scope, dtype=dtype):
-        nx = x.shape[-1].value
+        nx = hw.static_shape(x)[-1].value
         #c = conv1d(x, 'c_attn', n_state*3, hparams=hparams)
         #q0, k0, v0 = tf.split(c, 3, axis=-1)
         #q00 = conv1d(x, 'c_attn...0_of_3', n_state, hparams=hparams)
@@ -634,8 +635,8 @@ def attn_highway(x, scope, n_state, *, past, hparams, batch_size, seq_length):
         a2 = hw.row_parallel(a, dtype, 'c_proj', n_state, n_state)
         #a3 = dropout(a2, hparams.res_dropout)
         a3 = hw.pmap(dropout, a2, hparams.res_dropout)
-        a3 = a3[0]
-        present = present[0]
+        #a3 = a3[0]
+        #present = present[0]
         return a3, present
 
 
@@ -650,14 +651,17 @@ def dropout(x, pdrop=0.1, train=True):
 def block(x, scope, *, past, hparams, attn, **attn_kws):
     dtype = hparams.dtype if hparams else tf.float32
     with variable_scope(scope, dtype=dtype):
-        nx = x.shape[-1].value
-        x0 = norm(x, 'ln_1', hparams=hparams)
+        assert hw.alist(x)
+        #x = hw.identity(x)
+        nx = hw.static_shape(x)[-1].value
+        #x0 = norm(x, 'ln_1', hparams=hparams)
+        x0 = hw.pmap(norm, x, 'ln_1', hparams=hparams)
         #a, present = attn(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
         a, present = attn_highway(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
         #a, present = attn_parallel(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
         #x = x + a
-        x = hw.identity(x)
-        a = hw.identity(a)
+        #x = hw.identity(x)
+        #a = hw.identity(a)
         x = hw.pmap(tf.add, x, a)
         #x1 = norm(x, 'ln_2', hparams=hparams)
         x1 = hw.pmap(norm, hw.identity(x), 'ln_2', hparams=hparams)
@@ -669,7 +673,8 @@ def block(x, scope, *, past, hparams, attn, **attn_kws):
         #import pdb; pdb.set_trace()
         #x = x + m
         x = hw.pmap(tf.add, x, m)
-        x = x[0]
+        #x = x[0]
+        #present = present[0]
         return x, present
 
 @op_scope
@@ -723,13 +728,18 @@ def model(hparams, X, past=None, scope='model', reuse=tf.AUTO_REUSE, checkpoint=
         every = 1
         #tf.add_to_collection('checkpoints', h)
         #if api.should_break: pdb.set_trace()
+        #h = hw.identity(h) # why can't we move h outside of the loop?
         for layer, past in enumerate(pasts):
+            h = hw.identity(h) # why can't we move h outside of the loop?
             h, present = block(h, 'h%d' % layer, past=past, hparams=hparams,
                 attn=attn, batch_size=batch, seq_length=sequence)
+            present = present[0]
             #if layer == 10:
             if checkpoint and layer % every == 0:
-                tf.add_to_collection('checkpoints', h)
+                tf.add_to_collection('checkpoints', h[0])
             presents.append(present)
+            h = h[0] # why can't we move h outside of the loop?
+        #h = h[0] # why can't we move h outside of the loop?
         results['present'] = tf.stack(presents, axis=1)
         h = norm(h, 'ln_f', hparams=hparams)
 
