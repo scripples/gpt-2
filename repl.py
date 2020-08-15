@@ -11,9 +11,7 @@ batch_size = 1
 factor = 2; model_name='117M'; batch_size = 8
 
 #factor = 8; model_name='1558M'
-import tflex_tpu_device_assignment; import tflex_tpu_topology; topology = tflex_tpu_topology.get_topology(res); dev = tflex_tpu_device_assignment.spatial_partition(topology, factor)
-
-os.environ['NUM_CORES'] = str(factor)
+import tflex_tpu_device_assignment; import tflex_tpu_topology; topology = tflex_tpu_topology.get_topology(res); dev = tflex_tpu_device_assignment.spatial_partition(topology, factor); os.environ['NUM_CORES'] = str(factor)
 
 #zz = tpu_ops.shard(alloc_op(), outputs_from_all_shards=True, num_shards=dev.num_replicas, inputs=[], device_assignment=dev)
 
