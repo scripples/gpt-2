@@ -172,6 +172,8 @@ if __name__ == '__main__':
     print(cluster_def)
     print('cores: %d ip: %s' % (num_cores, master))
     r = sess.run
+    # to reload graph:
+    # graph = tf.Graph(); graph.as_default().__enter__(); sess = tf.compat.v1.InteractiveSession(master, graph=graph, config=session_config); r = sess.run; sess.as_default().__enter__()
     from tensorflow.python.tpu import tpu as tpu_ops
     from tensorflow.compiler.tf2xla.python import xla
     from tensorflow.compiler.tf2xla.ops import gen_xla_ops
