@@ -24,28 +24,37 @@ def op_scope(fn, name=None):
 class DefaultValue(_DefaultStack):
   def __init__(self, value):
     super(DefaultValue, self).__init__()
-    self.stack.append(value)
+    self._global_value = value
+    #self.stack.append(value)
 
   @property
   def global_value(self):
-    return self.stack[0]
+    x = self._global_value
+    if callable(x):
+      x = x()
+    return x
+    #return self.stack[0]
 
   @global_value.setter
   def global_value(self, value):
-    self.stack[0] = value
+    #self.stack[0] = value
+    self._global_value = value
 
   @property
   def value(self):
-    return self.stack[-1]
+    return self.stack[-1] if len(self.stack) > 0 else self.global_value
 
   def set(self, value):
-    self.stack[-1] = value
+    if len(self.stack) > 0:
+      self.stack[-1] = value
+    else:
+      self.global_value = value
 
   def overlay(self, value):
     return self.get_controller(value)
 
 
-_highway_size = DefaultValue(int(os.environ.get('NUM_CORES', '1')))
+_highway_size = DefaultValue(lambda: int(os.environ.get('NUM_CORES', '1')))
 _current_lane = DefaultValue(0)
 
 
@@ -85,6 +94,9 @@ def device_for_core(task=0, core=None, job=None):
     if job is None:
       job = "worker"
     return "/job:%s/task:%d/device:TPU_REPLICATED_CORE:%d" % (job, task, core)
+    # if job is None:
+    #   job = "tpu_worker"
+    # return "/job:%s/task:%d/device:TPU:%d" % (job, task, core)
   elif 'NUM_CORES' in os.environ:
     if job is None:
       job = "localhost"
