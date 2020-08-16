@@ -146,7 +146,8 @@ def row_parallel(h, dtype, scope, input_size, output_size):
   assert alist(h)
   highway_size = get_highway_size()
   input_size_per_partition = divide(input_size, highway_size)
-  w, b = init_weight_bias_parallel(dtype, scope, [input_size_per_partition, output_size], axis=-2, use_bias='full')
+  #w, b = init_weight_bias_parallel(dtype, scope, [input_size_per_partition, output_size], axis=-2, use_bias='full')
+  w, b = init_weight_bias_parallel(dtype, scope, [input_size_per_partition, output_size], axis=-2, use_bias='mirror')
   h1 = pmap(tf.matmul, h, w)
   def fork(b):
     #h2 = tf.stack(h1, name='row_parallel_stack')
@@ -184,7 +185,11 @@ def init_weight_bias_parallel(dtype, scope, shape, axis, use_bias=True, weight_n
         w = init_variable(weight_name + '__slice__%d_of_%d_of_%d' % (axis, lane, highway_size), shape, initializer=normal_initializer(dtype=dtype))
         weight.append(w)
         if use_bias and use_bias != 'full':
-          b = init_variable(bias_name + '__slice__%d_of_%d_of_%d' % (axis, lane, highway_size), shape[-1], initializer=constant_initializer(dtype=dtype))
+          if use_bias == 'mirror':
+            b = init_variable(bias_name + '__mirror__%d_of_%d' % (lane, highway_size), shape[-1], initializer=constant_initializer(dtype=dtype))
+          else:
+            assert use_bias is True
+            b = init_variable(bias_name + '__slice__%d_of_%d_of_%d' % (axis, lane, highway_size), shape[-1], initializer=constant_initializer(dtype=dtype))
           bias.append(b)
       if use_bias == 'full':
         bias = init_variable(bias_name, shape[-1], initializer=constant_initializer(dtype=dtype))
@@ -228,6 +233,17 @@ def init_variable(name, shape, initializer):
   if v is not None:
     return v
   return tf.get_variable(name, shape=shape, initializer=initializer, use_resource=True)
+
+
+@op_scope
+def init_variable_mirrored(name, shape, initializer):
+  highway_size = get_highway_size()
+  name = name.split('__mirror__')[0]
+  vs = []
+  for lane in swerve_across_highway():
+    v = init_variable(name + '__mirror__%d_of_%d' % (lane, highway_size), shape, initializer=initializer)
+    vs.append(v)
+  return vs
 
 
 @op_scope

@@ -10,6 +10,9 @@ import pdb
 import functools
 
 
+import highway as hw
+
+
 class Context():
   def __init__(self):
     self.should_break = False
@@ -483,9 +486,6 @@ def mlp_parallel(x, scope, n_state, *, hparams):
   return func(x)[0]
 
 
-import highway as hw
-
-
 @op_scope
 def mlp_highway(x, scope, n_state=None, *, hparams):
   highway_size = hw.get_highway_size()
@@ -648,6 +648,35 @@ def dropout(x, pdrop=0.1, train=True):
 
 
 @op_scope
+def norm_highway(x, scope, *, axis=-1, epsilon=1e-5, hparams=None):
+    """Normalize to mean = 0, std = 1, then do a diagonal affine transform."""
+    dtype = hparams.dtype if hparams else tf.float32
+    with variable_scope(scope, dtype=dtype):
+        assert hw.alist(x)
+        n_state = x[0].shape[-1].value
+        g = hw.init_variable_mirrored('g', [n_state], tf.constant_initializer(1, dtype=dtype))
+        b = hw.init_variable_mirrored('b', [n_state], tf.constant_initializer(0, dtype=dtype))
+        x0 = x
+        g0 = g
+        b0 = b
+        ops = []
+        for lane in hw.swerve_across_highway():
+          x = hw.at(x0, lane)
+          g = hw.at(g0, lane)
+          b = hw.at(b0, lane)
+          u = tf.reduce_mean(x, axis=axis, keepdims=True)
+          s = tf.reduce_mean(tf.square(x-u), axis=axis, keepdims=True)
+          x = (x - u) * tf.rsqrt(s + epsilon)
+          x = x*g + b
+          ops.append(x)
+        # u = hw.pmap(tf.reduce_mean, x, axis=axis, keepdims=True)
+        # u0 = hw.pmap(tf.subtract, x, u)
+        # u1 = hw.pmap(tf.square, u0)
+        # s = hw.pmap(tf.reduce_mean, u1, axis=axis, keepdims=True)
+        #return x
+        return ops
+
+@op_scope
 def block(x, scope, *, past, hparams, attn, **attn_kws):
     dtype = hparams.dtype if hparams else tf.float32
     with variable_scope(scope, dtype=dtype):
@@ -655,7 +684,8 @@ def block(x, scope, *, past, hparams, attn, **attn_kws):
         #x = hw.identity(x)
         nx = hw.static_shape(x)[-1].value
         #x0 = norm(x, 'ln_1', hparams=hparams)
-        x0 = hw.pmap(norm, x, 'ln_1', hparams=hparams)
+        #x0 = hw.pmap(norm, x, 'ln_1', hparams=hparams)
+        x0 = norm_highway(x, 'ln_1', hparams=hparams)
         #a, present = attn(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
         a, present = attn_highway(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
         #a, present = attn_parallel(x0, 'attn', nx, past=past, hparams=hparams, **attn_kws)
@@ -664,7 +694,8 @@ def block(x, scope, *, past, hparams, attn, **attn_kws):
         #a = hw.identity(a)
         x = hw.pmap(tf.add, x, a)
         #x1 = norm(x, 'ln_2', hparams=hparams)
-        x1 = hw.pmap(norm, hw.identity(x), 'ln_2', hparams=hparams)
+        #x1 = hw.pmap(norm, hw.identity(x), 'ln_2', hparams=hparams)
+        x1 = norm_highway(x, 'ln_2', hparams=hparams)
         #m = mlp(x1, 'mlp', nx*4, hparams=hparams)
         #m = mlp_parallel(x1, 'mlp', nx*4, hparams=hparams)
         m = mlp_highway(x1, 'mlp', nx*4, hparams=hparams)

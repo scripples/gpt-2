@@ -369,6 +369,7 @@ def variable_name(variable):
   name = variable.name
   name = '/'.join([x.split('...')[0] for x in name.split('/')])
   name = name.split('__slice__')[0]
+  name = name.split('__mirror__')[0]
   if ':' not in name:
     name = name + ':' + variable.name.split(':')[-1]
   if re.match(r'core[0-9]+/', name):
@@ -393,6 +394,12 @@ def variable_slice(variable):
     #     value = value[..., slice_stride*slice_index:slice_stride*(slice_index+1), :]
     #   else:
     #     assert False
+
+# def variable_mirrored(variable):
+#   if '__mirror__' in variable.name:
+#     return [int(x) for x in variable.name.split('__mirror')[-1].split(':')[0].split('_of_')]
+#   else:
+#     return 0, 0
 
 def join_variables(variables, values):
   results = {}
