@@ -14,6 +14,7 @@ from pprint import pprint as pp
 
 from tensorflow.contrib import tpu
 from tensorflow.contrib.cluster_resolver import TPUClusterResolver
+from tensorflow.core.protobuf import config_pb2
 
 def get_tpu_addr(tpu_name=None):
     # Get the TPU's location
@@ -33,11 +34,42 @@ def get_session_target(target='auto'):
       print("Using TPU %s" % target)
     return target
 
+def get_tpu_config():
+  session_config = config_pb2.ConfigProto(allow_soft_placement=True, isolate_session_state=False)
+  master = None
+  res = None
+  cluster_spec = None
+  cluster_def = None
+  job_names = None
+  master_job = 'worker'
+  try:
+    if 'TPU_NAME' in os.environ or 'COLAB_TPU_ADDR' in os.environ:
+      res = TPUClusterResolver(os.environ.get('TPU_NAME', os.environ.get('COLAB_TPU_ADDR', None)))
+      master = res.get_master()
+      cluster_spec = res.cluster_spec()
+      if cluster_spec:
+        cluster_def = cluster_spec.as_cluster_def()
+        session_config.cluster_def.CopyFrom(cluster_def)
+        job_names = set([job.name for job in cluster_def.job])
+        assert len(job_names) == 1
+        master_job = cluster_def.job[0].name
+    elif 'TPU_IP' in os.environ:
+      master = os.environ['TPU_IP'].replace('grpc://', '')
+      if ':' not in master:
+        master = master + ':8470'
+      master = 'grpc://' + master
+  except:
+    import traceback
+    traceback.print_exc()
+  return session_config
+
 def get_session_config(config='auto'):
     if config != 'auto':
       return config
     elif 'TPU_NAME' in os.environ or 'COLAB_TPU_ADDR' in os.environ:
-      return None # TODO: create a session config with a timeout of 10min?
+      #return None # TODO: create a session config with a timeout of 10min?
+      #import pdb; pdb.set_trace()
+      return get_tpu_config()
     elif 'NUM_CORES' in os.environ:
       n_inter = int(os.environ['NUM_CORES'])
       n_intra = int(os.environ['NUM_CORES'])
