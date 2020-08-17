@@ -10,6 +10,7 @@ import h5py
 import shutil
 import tempfile
 import math
+from pprint import pprint as pp
 
 from tensorflow.contrib import tpu
 from tensorflow.contrib.cluster_resolver import TPUClusterResolver
@@ -26,21 +27,75 @@ def get_tpu_addr(tpu_name=None):
 def get_session_target(target='auto'):
     if target == 'auto':
       target = get_tpu_addr()
-      if target is not None:
-        print("Using TPU %s" % target)
+    elif target is not None:
+      target = get_tpu_addr(target)
+    if target is not None:
+      print("Using TPU %s" % target)
     return target
 
-class Session(tf.Session):
-  def __init__(self, target='auto', graph=None, config=None, init_tpu=False):
-    super().__init__(get_session_target(target), graph=graph, config=config)
-    self.init_tpu=init_tpu
+def get_session_config(config='auto'):
+    if config != 'auto':
+      return config
+    elif 'TPU_NAME' in os.environ or 'COLAB_TPU_ADDR' in os.environ:
+      return None # TODO: create a session config with a timeout of 10min?
+    elif 'NUM_CORES' in os.environ:
+      n_inter = int(os.environ['NUM_CORES'])
+      n_intra = int(os.environ['NUM_CORES'])
+      n_devs = int(os.environ['NUM_CORES'])
+      print('Using %d CPU cores' % n_devs)
+      return tf.ConfigProto(
+              device_count={ "CPU": n_devs },
+              inter_op_parallelism_threads=n_inter,
+              intra_op_parallelism_threads=n_intra,
+        ) # https://github.com/tensorflow/tensorflow/issues/22619#issuecomment-426355744
+    else:
+      return None
 
-  def __enter__(self):
-    sess = super().__enter__()
-    if self.init_tpu:
-      print("Initializing TPU...")
-      sess.run(tpu.initialize_system())
-    return sess
+def get_current_device(session):
+  # is there a nicer way?
+  try:
+    return session.graph._device_function_stack.peek_top_obj().name
+  except IndexError:
+    return None
+
+def pretty(s, n=64):
+  if len(s) > n:
+    return s[0:n - len('...')] + '...'
+  return s
+
+def prettify(l, n=64):
+  if isinstance(l, (tuple, list)):
+    return [prettify(x, n=n) for x in l]
+  elif isinstance(l, dict):
+    return {prettify(k, n=n): prettify(v, n=n) for k, v in l.items()}
+  elif isinstance(l, str):
+    return pretty(l, n=n)
+  elif isinstance(l, np.ndarray):
+    return pretty('{!r}: {}'.format(l.shape, str(l)), n=n)
+  else:
+    return pretty(str(l), n=n)
+
+def pretty_obj(x, n=64):
+  return repr(prettify(x, n=n))
+
+class Session(tf.Session):
+  def __init__(self, target='auto', graph=None, config='auto'):
+    target = get_session_target(target)
+    config = get_session_config(config)
+    super(Session, self).__init__(target, graph=graph, config=config)
+    self.target = target
+    self.config = config
+    self._tflex_cached_devices = self.list_devices()
+    pp(self._tflex_cached_devices)
+
+  def run(self, *args, **kws):
+    now = time.time()
+    device = get_current_device(self)
+    print('Session.run device=%s %s %s' % (repr(device), pretty_obj(args), pretty_obj(kws)))
+    result = super(Session, self).run(*args, **kws)
+    elapsed = time.time() - now
+    print('Session.run device=%s finished in %.2fsec: %s %s' % (repr(device), elapsed, pretty_obj(args), pretty_obj(kws)))
+    return result
 
 def split_by_params(vs, n=200e6, f=None):
   if f is None:
