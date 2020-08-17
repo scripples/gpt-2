@@ -146,6 +146,10 @@ class HighSpeedTokenizer(object):
         pad_token
       )
     self.tokenizer = tokenizer
+    with open(vocab_path) as f:
+      self.encoder = json.load(f)
+    if '<|endoftext|>' not in self.encoder:
+      raise ValueError("Encoder {!r} must contain an entry for <|endoftext|>".format(vocab_path))
 
   def encode(self, text):
     tokens = []
