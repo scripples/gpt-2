@@ -18,7 +18,7 @@ def interact_model(
     model_name='117M',
     restore_from=None,
     seed=None,
-    nsamples=1,
+    nsamples=0,
     batch_size=1,
     length=None,
     temperature=1,
@@ -32,7 +32,7 @@ def interact_model(
     :model_name=117M : String, which model to use
     :seed=None : Integer seed for random number generators, fix seed to reproduce
      results
-    :nsamples=1 : Number of samples to return total
+    :nsamples=0 : Number of samples to return total
     :batch_size=1 : Number of batches (only affects speed/memory).  Must divide nsamples.
     :length=None : Number of tokens in generated text, if None (default), is
      determined by model hyperparameters
@@ -52,7 +52,6 @@ def interact_model(
     """
     if batch_size is None:
         batch_size = 1
-    assert nsamples % batch_size == 0
 
     enc = encoder.get_encoder(model_name)
     hparams = model.default_hparams()
@@ -97,7 +96,7 @@ def interact_model(
             print('Prompt:', repr(raw_text))
             context_tokens = enc.encode(raw_text)
             generated = 0
-            for _ in range(nsamples // batch_size):
+            while nsamples == 0 or generated < nsamples:
                 out = sess.run(output, feed_dict={
                     context: [context_tokens for _ in range(batch_size)]
                 })[:, len(context_tokens):]

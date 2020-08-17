@@ -23,6 +23,12 @@ def get_variable(name):
         if x.name.startswith(name + ':'):
             return x
 
+def init_variable(name, shape, initializer):
+  v = get_variable(name)
+  if v is not None:
+    return v
+  return tf.get_variable(name, shape, initializer=initializer, use_resource=True)
+
 def shape_list(x):
     """Deal with dynamic shape in tensorflow cleanly."""
     static = x.shape.as_list()
@@ -42,8 +48,8 @@ def norm(x, scope, *, axis=-1, epsilon=1e-5, hparams=None):
     dtype = hparams.dtype if hparams else tf.float32
     with tf.variable_scope(scope, dtype=dtype):
         n_state = x.shape[-1].value
-        g = get_variable('g') or tf.get_variable('g', [n_state], initializer=tf.constant_initializer(1, dtype=dtype))
-        b = get_variable('b') or tf.get_variable('b', [n_state], initializer=tf.constant_initializer(0, dtype=dtype))
+        g = init_variable('g', [n_state], initializer=tf.constant_initializer(1, dtype=dtype))
+        b = init_variable('b', [n_state], initializer=tf.constant_initializer(0, dtype=dtype))
         u = tf.reduce_mean(x, axis=axis, keepdims=True)
         s = tf.reduce_mean(tf.square(x-u), axis=axis, keepdims=True)
         x = (x - u) * tf.rsqrt(s + epsilon)
@@ -64,8 +70,8 @@ def conv1d(x, scope, nf, *, w_init_stdev=0.02, hparams=None):
     dtype = hparams.dtype if hparams else tf.float32
     with tf.variable_scope(scope, dtype=dtype):
         *start, nx = shape_list(x)
-        w = get_variable('w') or tf.get_variable('w', [1, nx, nf], initializer=tf.random_normal_initializer(stddev=w_init_stdev, dtype=dtype))
-        b = get_variable('b') or tf.get_variable('b', [nf], initializer=tf.constant_initializer(0, dtype=dtype))
+        w = init_variable('w', [1, nx, nf], initializer=tf.random_normal_initializer(stddev=w_init_stdev, dtype=dtype))
+        b = init_variable('b', [nf], initializer=tf.constant_initializer(0, dtype=dtype))
         c = tf.reshape(tf.matmul(tf.reshape(x, [-1, nx]), tf.reshape(w, [-1, nf]))+b, start+[nf])
         return c
 
@@ -156,30 +162,41 @@ def block(x, scope, *, past, hparams):
 def past_shape(*, hparams, batch_size=None, sequence=None):
     return [batch_size, hparams.n_layer, 2, hparams.n_head, sequence, hparams.n_embd // hparams.n_head]
 
-def expand_tile(value, size):
+def expand_tile(value, size, axis=0):
     """Add a new axis of given size."""
     value = tf.convert_to_tensor(value, name='value')
-    ndims = value.shape.ndims
-    return tf.tile(tf.expand_dims(value, axis=0), [size] + [1]*ndims)
+    value1 = tf.expand_dims(value, axis=axis)
+    ndims = value1.shape.ndims
+    multiples = [1]*ndims
+    multiples[axis] = size
+    return tf.tile(value1, multiples)
 
 def positions_for(tokens, past_length):
     batch_size = tf.shape(tokens)[0]
     nsteps = tf.shape(tokens)[1]
     return expand_tile(past_length + tf.range(nsteps), batch_size)
 
+def window_for(length, nsteps, past_length=0):
+    #return past_length + tf.add_n(tf.unstack(tf.stack(tf.meshgrid(tf.range(0, nsteps), tf.range(0, length)), axis=-1), axis=-1))
+    return past_length + tf.add_n(tf.meshgrid(tf.range(0, nsteps), tf.range(0, length)))
 
-def model(hparams, X, past=None, scope='model', reuse=tf.AUTO_REUSE):
+
+def model(hparams, X, past=None, scope='model', reuse=tf.AUTO_REUSE, batch_size=None, sequence=None):
     dtype = hparams.dtype if hparams else tf.float32
     with tf.variable_scope(scope, reuse=reuse, dtype=dtype):
         results = {}
-        batch, sequence = shape_list(X)
+        if batch_size is not None and sequence is not None:
+          batch = batch_size
+        else:
+          batch, sequence = shape_list(X)
 
-        wpe = get_variable('wpe') or tf.get_variable('wpe', [hparams.n_ctx, hparams.n_embd],
+        wpe = init_variable('wpe', [hparams.n_ctx, hparams.n_embd],
                              initializer=tf.random_normal_initializer(stddev=0.01, dtype=dtype))
-        wte = get_variable('wte') or tf.get_variable('wte', [hparams.n_vocab, hparams.n_embd],
+        wte = init_variable('wte', [hparams.n_vocab, hparams.n_embd],
                              initializer=tf.random_normal_initializer(stddev=0.02, dtype=dtype))
         past_length = 0 if past is None else tf.shape(past)[-2]
         h = tf.gather(wte, X) + tf.gather(wpe, positions_for(X, past_length))
+        #h = tf.gather(wte, X) + tf.gather(wpe, positions_for(tf.zeros([batch, sequence]), past_length))
 
         # Transformer
         presents = []

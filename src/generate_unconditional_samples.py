@@ -10,6 +10,8 @@ import json
 import numpy as np
 import tensorflow as tf
 import tflex
+import nflex as nf
+import functools
 
 import model, sample, encoder
 
@@ -59,26 +61,48 @@ def sample_model(
     elif length > hparams.n_ctx:
         raise ValueError("Can't get samples longer than window size: %s" % hparams.n_ctx)
 
-    with tflex.Session(graph=tf.Graph()) as sess:
+    with tf.Graph().as_default() as graph, tflex.Session(graph=graph) as sess:
         np.random.seed(seed)
         tf.set_random_seed(seed)
 
-        output = sample.sample_sequence(
-            hparams=hparams, length=length,
-            start_token=enc.encoder['<|endoftext|>'],
-            batch_size=batch_size,
-            temperature=temperature, top_k=top_k, top_p=top_p, penalize=penalize
-        )[:, 1:]
+        def sampler(context=None):
+          output = sample.sample_sequence(
+              hparams=hparams, length=length,
+              start_token=enc.encoder['<|endoftext|>'] if context is None else None,
+              context=context,
+              batch_size=batch_size,
+              temperature=temperature, top_k=top_k, top_p=top_p, penalize=penalize
+          )
+          return [output]
+
+        context = nf.pad_along_axis([enc.encode('Hello, my name is')] * batch_size, hparams.n_ctx)
+        sample1 = functools.partial(sampler, context=context)
+
+        tpu_core_count = len([device for device in sess.list_devices() if ':TPU:' in device.name])
+        using_tpu = tpu_core_count > 0
+
+        if using_tpu:
+          (output,) = tf.compat.v1.tpu.shard(sample1, num_shards=tpu_core_count, outputs_from_all_shards=True)
+          # with tf.Graph().as_default() as init_graph, tflex.Session(graph=init_graph) as init_sess:
+          #   init_sess.run(tf.compat.v1.tpu.initialize_system())
+        else:
+          output = sample1()
+
+        if restore_from is None:
+          if using_tpu:
+            restore_from = os.path.join('gs://tpu-usc1/models/gpt-2', model_name)
+          else:
+            restore_from = os.path.join('models', model_name)
+        print(restore_from)
 
         saver = tflex.Saver()
-        if restore_from is None:
-          restore_from = os.path.join('models', model_name)
         ckpt = tflex.latest_checkpoint(restore_from)
         saver.restore(sess, ckpt)
 
         generated = 0
         while nsamples == 0 or generated < nsamples:
             out = sess.run(output)
+            #import pdb; pdb.set_trace()
             for i in range(batch_size):
                 generated += 1
                 text = enc.decode(out[i])

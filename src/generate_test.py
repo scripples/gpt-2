@@ -116,6 +116,14 @@ def sample_model(
                 #tf.squeeze(samples, axis=[1]),
                 tf.concat([output, samples], axis=1),
             ]
+
+        def fused(tokens, past=None):
+          if past is None:
+            next_outputs = step(hparams, tokens)
+            past = next_outputs['present']
+          #past, prev, output = body(past=past, prev=tokens[..., -1], output=tokens)
+          past, output = body(past=past, output=tokens)
+          return [output]
         
         context_IN = tf.placeholder(tf.int32, [batch_size, None], name='context_IN')
         past_IN = tf.placeholder(tf.float32, model.past_shape(hparams=hparams, batch_size=batch_size), name='past_IN')
@@ -134,57 +142,67 @@ def sample_model(
         body_past_OUT, body_output_OUT = body(past_IN, output_IN)
         body_OUT = {'past': body_past_OUT, 'output': body_output_OUT}
 
+
+        fused_OUT = fused(tokens=context_IN)
+
         saver = tflex.Saver()
         if restore_from is None:
           restore_from = os.path.join('models', model_name)
         ckpt = tflex.latest_checkpoint(restore_from)
         saver.restore(sess, ckpt)
 
+        raw_text = read_prompt(prompt)
+        encoded_tokens = enc.encode(raw_text)
+        context_tokens = np.array([encoded_tokens] * batch_size, dtype=np.int32)
+
         generated = 0
         while nsamples == 0 or generated < nsamples:
-            raw_text = read_prompt(prompt)
-            encoded_tokens = enc.encode(raw_text)
-            context_tokens = np.array([encoded_tokens] * batch_size, dtype=np.int32)
 
-            step_In = {context_IN: context_tokens}
-            step_Out = sess.run(step_OUT, step_In)
+            # step_In = {context_IN: context_tokens}
+            # step_Out = sess.run(step_OUT, step_In)
 
-            #body_In = {past_IN: step_Out['present'], prev_IN: context_tokens[:, -1], output_IN: context_tokens}
-            body_In = {past_IN: step_Out['present'], output_IN: context_tokens}
-            body_Out = sess.run(body_OUT, body_In)
+            # #body_In = {past_IN: step_Out['present'], prev_IN: context_tokens[:, -1], output_IN: context_tokens}
+            # body_In = {past_IN: step_Out['present'], output_IN: context_tokens}
+            # body_Out = sess.run(body_OUT, body_In)
 
-            print('=== step() ===')
-            print('')
-            print('--- step() input: context_IN=context_tokens ---')
-            print('')
-            for k, v in step_In.items(): p([k, v]) # p({k: v})
-            print('')
-            #print('--- step() output: step_OUT["logits"], step_OUT["present"] = step(tokens=context_IN) ---')
-            print('--- step() output: step(tokens=context_IN) ---')
-            print('')
-            for k, v in step_Out.items(): p([k, v]) # p({k: v})
 
-            print('=== body() ===')
-            print('')
-            #print('--- body() input: past_IN=step_OUT["present"], prev_IN=context_tokens[:, -1], output_IN=context_tokens ---')
-            print('--- body() input: past_IN=step_OUT["present"], output_IN=context_tokens ---')
-            print('')
-            for k, v in body_In.items(): p([k, v]) # p({k: v})
-            print('')
-            #print('--- body() output: body_OUT["past"], body_OUT["prev"], body_OUT["output"] = body(past_IN, prev_IN, output_IN) ---')
-            #print('--- body() output: body(past_IN, prev_IN, output_IN) ---')
-            print('--- body() output: body(past_IN, output_IN) ---')
-            print('')
-            for k, v in body_Out.items(): p([k, v]) # p({k: v})
+            fused_In = {context_IN: context_tokens}
+            fused_Out = sess.run(fused_OUT, fused_In)
+
+#             print('=== step() ===')
+#             print('')
+#             print('--- step() input: context_IN=context_tokens ---')
+#             print('')
+#             for k, v in step_In.items(): p([k, v]) # p({k: v})
+#             print('')
+#             #print('--- step() output: step_OUT["logits"], step_OUT["present"] = step(tokens=context_IN) ---')
+#             print('--- step() output: step(tokens=context_IN) ---')
+#             print('')
+#             for k, v in step_Out.items(): p([k, v]) # p({k: v})
+
+#             print('=== body() ===')
+#             print('')
+#             #print('--- body() input: past_IN=step_OUT["present"], prev_IN=context_tokens[:, -1], output_IN=context_tokens ---')
+#             print('--- body() input: past_IN=step_OUT["present"], output_IN=context_tokens ---')
+#             print('')
+#             for k, v in body_In.items(): p([k, v]) # p({k: v})
+#             print('')
+#             #print('--- body() output: body_OUT["past"], body_OUT["prev"], body_OUT["output"] = body(past_IN, prev_IN, output_IN) ---')
+#             #print('--- body() output: body(past_IN, prev_IN, output_IN) ---')
+#             print('--- body() output: body(past_IN, output_IN) ---')
+#             print('')
+#             for k, v in body_Out.items(): p([k, v]) # p({k: v})
 
             print('')
             print('=== final results ===')
             print('')
             p(['prompt', raw_text])
-            p(['completion', [enc.decode(x) for x in body_Out['output']]])
+            #p(['completion', [enc.decode(x) for x in body_Out['output']]])
+            p(['completion', [enc.decode(x) for x in fused_Out[-1]]])
             print('')
-            
             import pdb; pdb.set_trace()
+            context_tokens = fused_Out[-1]
+            
 
 if __name__ == '__main__':
     fire.Fire(sample_model)
