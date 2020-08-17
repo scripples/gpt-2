@@ -150,6 +150,8 @@ def split_by_params(vs, n=200e6, f=None):
   yield xs
 
 def latest_checkpoint(checkpoint_dir, latest_filename=None):
+  if checkpoint_dir.startswith('gs://'):
+    return tf.train.latest_checkpoint(checkpoint_dir)
   paths = [x for x in glob(os.path.join(checkpoint_dir, 'model-*.*')) if not x.endswith(".tmp")]
   ctrs = np.array([[int(y) for y in re.findall(r'model-([0-9]+)(?:-[0-9]+)?[.](?:npy|hdf5)', x)] for x in paths]).flatten()
   if len(ctrs) <= 0:
@@ -295,7 +297,10 @@ class Saver(object):
     self.checkpoints = []
 
   def restore(self, sess, save_path):
-    if '.ckpt' in os.path.basename(save_path):
+    if save_path.startswith('gs://'):
+      saver = tf.train.Saver(var_list=self.var_list)
+      saver.restore(sess, save_path)
+    elif '.ckpt' in os.path.basename(save_path):
       load_snapshot(save_path, session=sess, var_list=self.var_list, reshape=self.reshape)
     elif save_path.endswith('.hdf5'):
       load_variables(save_path, session=sess, var_list=self.var_list, reshape=self.reshape)
