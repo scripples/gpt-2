@@ -10,6 +10,7 @@ import json
 import numpy as np
 import tensorflow as tf
 import tflex
+from tflex import p
 import numpy as np
 
 import model, sample, encoder
@@ -43,8 +44,8 @@ def sample_model(
     nsamples=0,
     batch_size=1,
     length=None,
-    temperature=1,
-    top_k=0,
+    temperature=0.8,
+    top_k=40,
     top_p=0.0,
     penalize=0,
     epsilon=-1e10,
@@ -93,27 +94,9 @@ def sample_model(
             if hparams.dtype != tf.float32:
                 lm_output["logits"] = tf.cast(lm_output["logits"], tf.float32)
 
-            logits = lm_output['logits'][:, :, :hparams.n_vocab]
-            presents = lm_output['present']
-            presents.set_shape(model.past_shape(hparams=hparams, batch_size=batch_size))
-            return {
-                'logits': logits,
-                'presents': presents,
-            }
-        
-
-        context = tf.placeholder(tf.int32, [batch_size, None])
-      
-
-        # Don't feed the last context token -- leave that to the loop below
-        # TODO: Would be slightly faster if we called step on the entire context,
-        # rather than leaving the last token transformer calculation to the while loop.
-        #context_output = step(hparams, context[:, :-1])
-        context_output = step(hparams, context)
-
-        past_ctx = tf.placeholder(tf.float32, model.past_shape(hparams=hparams, batch_size=batch_size))
-        prev_ctx = tf.placeholder(tf.int32, [batch_size])
-        output_ctx = tf.placeholder(tf.int32, [batch_size, None])
+            #lm_output['logits'] = lm_output['logits'][:, :, :hparams.n_vocab]
+            #lm_output['present'].set_shape(model.past_shape(hparams=hparams, batch_size=batch_size))
+            return lm_output
 
         def body(past, prev, output):
             next_outputs = step(hparams, prev[:, tf.newaxis], past=past)
@@ -126,22 +109,25 @@ def sample_model(
                 logits = top_k_logits(logits, k=top_k, epsilon=epsilon)
             samples = tf.multinomial(logits, num_samples=1, output_dtype=tf.int32)
             return [
-                tf.concat([past, next_outputs['presents']], axis=-2),
+                tf.concat([past, next_outputs['present']], axis=-2),
                 tf.squeeze(samples, axis=[1]),
                 tf.concat([output, samples], axis=1),
             ]
-
-        past, prev, output = body(past_ctx, prev_ctx, output_ctx)
-        sample = {'past': past, 'prev': prev, 'output': output}
-    
         
+        context_IN = tf.placeholder(tf.int32, [batch_size, None], name='context_IN')
+        past_IN = tf.placeholder(tf.float32, model.past_shape(hparams=hparams, batch_size=batch_size), name='past_IN')
+        prev_IN = tf.placeholder(tf.int32, [batch_size], name='prev_IN')
+        output_IN = tf.placeholder(tf.int32, [batch_size, None], name='output_IN')
 
-        # output = sample.sample_sequence(
-        #     hparams=hparams, length=length,
-        #     start_token=enc.encoder['<|endoftext|>'],
-        #     batch_size=batch_size,
-        #     temperature=temperature, top_k=top_k, top_p=top_p, penalize=penalize
-        # )[:, 1:]
+        # Don't feed the last context token -- leave that to the loop below
+        # TODO: Would be slightly faster if we called step on the entire context,
+        # rather than leaving the last token transformer calculation to the while loop.
+        #context_output = step(hparams, context[:, :-1])
+        step_OUT = step(hparams, tokens=context_IN)
+        step_OUT_using_past = step(hparams, tokens=context_IN, past=past_IN)
+
+        body_past_OUT, body_prev_OUT, body_output_OUT = body(past_IN, prev_IN, output_IN)
+        body_OUT = {'past': body_past_OUT, 'prev': body_prev_OUT, 'output': body_output_OUT}
 
         saver = tflex.Saver()
         if restore_from is None:
@@ -154,39 +140,42 @@ def sample_model(
             raw_text = read_prompt(prompt)
             encoded_tokens = enc.encode(raw_text)
             context_tokens = np.array([encoded_tokens] * batch_size, dtype=np.int32)
-            out = sess.run(context_output, {context: context_tokens})
-            #out1 = {k+'_'+str(i): x[i] for k, v in out.items() for i, x in enumerate(v)}
 
-            past0 = out['presents']
-            prev0 = context_tokens[:, -1]
-            output0 = context_tokens
+            step_In = {context_IN: context_tokens}
+            step_Out = sess.run(step_OUT, step_In)
 
-            result = sess.run(sample, {past_ctx: past0, prev_ctx: prev0, output_ctx: output0})
-            o = {}
-            p = lambda x: pp(tflex.prettify(x))
-            for k, v in {'past_ctx': past0, 'prev_ctx': prev0, 'output_ctx': output0}.items():
-              p({k: v})
-            print('--- step() ---')
-            for k, v in out.items():
-              p({k: v})
-            print('--- body(step()) ---')
-            for k, v in result.items():
-              p({k: v})
-            print('--- output: ---')
-            p({'prompt': raw_text})
-            p({'completion': [enc.decode(x) for x in result['output']]})
-            #result1 = {k+'_'+str(i): x[i] for k, v in result.items() for i, x in enumerate(v)}
+            body_In = {past_IN: step_Out['present'], prev_IN: context_tokens[:, -1], output_IN: context_tokens}
+            body_Out = sess.run(body_OUT, body_In)
 
-            #pp(tflex.pretty_obj({'past': past, 'prev': prev, 'output': output}))
-            #pp(tflex.prettify(out, n=40))
-            #pp(tflex.prettify(result, n=40))
-            #pp(tflex.prettify(o))
+            print('=== step() ===')
+            print('')
+            print('--- step() input: context_IN=context_tokens ---')
+            print('')
+            for k, v in step_In.items(): p([k, v]) # p({k: v})
+            print('')
+            #print('--- step() output: step_OUT["logits"], step_OUT["present"] = step(tokens=context_IN) ---')
+            print('--- step() output: step(tokens=context_IN) ---')
+            print('')
+            for k, v in step_Out.items(): p([k, v]) # p({k: v})
 
-            # loop_vars=[
-            #     context_output['presents'],
-            #     context[:, -1],
-            #     context,
-            # ],
+            print('=== body() ===')
+            print('')
+            print('--- body() input: past_IN=step_OUT["present"], prev_IN=context_tokens[:, -1], output_IN=context_tokens ---')
+            print('')
+            #for k, v in {'past_IN': past0, 'prev_IN': prev0, 'output_IN': output0}.items():
+            for k, v in body_In.items(): p([k, v]) # p({k: v})
+            print('')
+            #print('--- body() output: body_OUT["past"], body_OUT["prev"], body_OUT["output"] = body(past_IN, prev_IN, output_IN) ---')
+            print('--- body() output: body(past_IN, prev_IN, output_IN) ---')
+            print('')
+            for k, v in body_Out.items(): p([k, v]) # p({k: v})
+
+            print('')
+            print('=== final results ===')
+            print('')
+            p(['prompt', raw_text])
+            p(['completion', [enc.decode(x) for x in body_Out['output']]])
+            print('')
             
             import pdb; pdb.set_trace()
 

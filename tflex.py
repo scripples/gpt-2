@@ -71,12 +71,17 @@ def prettify(l, n=64):
   elif isinstance(l, str):
     return pretty(l, n=n)
   elif isinstance(l, np.ndarray):
-    return pretty('{!r}: {}'.format(l.shape, str(l)), n=n)
+    #return pretty('{!r}: {}'.format(l.shape, str(l)), n=n)
+    return [{'shape': l.shape}, pretty(str(l), n=n)]
   else:
     return pretty(str(l), n=n)
 
 def pretty_obj(x, n=64):
   return repr(prettify(x, n=n))
+
+def p(x, n=64):
+  pp(prettify(x, n=n))
+  return x
 
 class Session(tf.Session):
   def __init__(self, target='auto', graph=None, config='auto'):
