@@ -98,7 +98,10 @@ def sample_model(
             #lm_output['present'].set_shape(model.past_shape(hparams=hparams, batch_size=batch_size))
             return lm_output
 
-        def body(past, prev, output):
+        #def body(past, prev, output):
+        def body(past, output):
+            #next_outputs = step(hparams, prev[:, tf.newaxis], past=past)
+            prev = output[..., -1]
             next_outputs = step(hparams, prev[:, tf.newaxis], past=past)
             logits = next_outputs['logits'][:, -1, :]  / tf.to_float(temperature)
             if penalize > 0.0:
@@ -110,7 +113,7 @@ def sample_model(
             samples = tf.multinomial(logits, num_samples=1, output_dtype=tf.int32)
             return [
                 tf.concat([past, next_outputs['present']], axis=-2),
-                tf.squeeze(samples, axis=[1]),
+                #tf.squeeze(samples, axis=[1]),
                 tf.concat([output, samples], axis=1),
             ]
         
@@ -126,8 +129,10 @@ def sample_model(
         step_OUT = step(hparams, tokens=context_IN)
         step_OUT_using_past = step(hparams, tokens=context_IN, past=past_IN)
 
-        body_past_OUT, body_prev_OUT, body_output_OUT = body(past_IN, prev_IN, output_IN)
-        body_OUT = {'past': body_past_OUT, 'prev': body_prev_OUT, 'output': body_output_OUT}
+        #body_past_OUT, body_prev_OUT, body_output_OUT = body(past_IN, prev_IN, output_IN)
+        #body_OUT = {'past': body_past_OUT, 'prev': body_prev_OUT, 'output': body_output_OUT}
+        body_past_OUT, body_output_OUT = body(past_IN, output_IN)
+        body_OUT = {'past': body_past_OUT, 'output': body_output_OUT}
 
         saver = tflex.Saver()
         if restore_from is None:
@@ -144,7 +149,8 @@ def sample_model(
             step_In = {context_IN: context_tokens}
             step_Out = sess.run(step_OUT, step_In)
 
-            body_In = {past_IN: step_Out['present'], prev_IN: context_tokens[:, -1], output_IN: context_tokens}
+            #body_In = {past_IN: step_Out['present'], prev_IN: context_tokens[:, -1], output_IN: context_tokens}
+            body_In = {past_IN: step_Out['present'], output_IN: context_tokens}
             body_Out = sess.run(body_OUT, body_In)
 
             print('=== step() ===')
@@ -160,13 +166,14 @@ def sample_model(
 
             print('=== body() ===')
             print('')
-            print('--- body() input: past_IN=step_OUT["present"], prev_IN=context_tokens[:, -1], output_IN=context_tokens ---')
+            #print('--- body() input: past_IN=step_OUT["present"], prev_IN=context_tokens[:, -1], output_IN=context_tokens ---')
+            print('--- body() input: past_IN=step_OUT["present"], output_IN=context_tokens ---')
             print('')
-            #for k, v in {'past_IN': past0, 'prev_IN': prev0, 'output_IN': output0}.items():
             for k, v in body_In.items(): p([k, v]) # p({k: v})
             print('')
             #print('--- body() output: body_OUT["past"], body_OUT["prev"], body_OUT["output"] = body(past_IN, prev_IN, output_IN) ---')
-            print('--- body() output: body(past_IN, prev_IN, output_IN) ---')
+            #print('--- body() output: body(past_IN, prev_IN, output_IN) ---')
+            print('--- body() output: body(past_IN, output_IN) ---')
             print('')
             for k, v in body_Out.items(): p([k, v]) # p({k: v})
 
