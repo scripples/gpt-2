@@ -2,7 +2,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.contrib.training import HParams
 
-def default_hparams():
+def default_hparams(trainable=True, dtype=tf.float32):
     return HParams(
         n_vocab=50257,
         n_ctx=1024,
@@ -11,23 +11,28 @@ def default_hparams():
         n_layer=12,
         res_dropout=0.0,
         attn_dropout=0.0,
-        dtype=tf.float32
+        dtype=dtype,
+        trainable=trainable,
     )
 
 import os
 
-def get_variable(name):
+def get_variable(name, variables=None):
     name = os.path.join(tf.get_variable_scope().name, name)
-    vs = tf.trainable_variables()
+    vs = variables if variables is not None else tf.trainable_variables()
     for x in vs:
         if x.name.startswith(name + ':'):
             return x
 
-def init_variable(name, shape, initializer):
-  v = get_variable(name)
+def init_variable(name, shape, initializer, hparams):
+  vs = tf.trainable_variables() if hparams.trainable else tf.local_variables()
+  v = get_variable(name, vs)
   if v is not None:
     return v
-  return tf.get_variable(name, shape, initializer=initializer, use_resource=True)
+  if hparams.trainable:
+    return tf.get_variable(name, shape, initializer=initializer, use_resource=True)
+  else:
+    return tf.get_local_variable(name, shape, initializer=initializer, use_resource=True)
 
 def shape_list(x):
     """Deal with dynamic shape in tensorflow cleanly."""
@@ -48,8 +53,8 @@ def norm(x, scope, *, axis=-1, epsilon=1e-5, hparams=None):
     dtype = hparams.dtype if hparams else tf.float32
     with tf.variable_scope(scope, dtype=dtype):
         n_state = x.shape[-1].value
-        g = init_variable('g', [n_state], initializer=tf.constant_initializer(1, dtype=dtype))
-        b = init_variable('b', [n_state], initializer=tf.constant_initializer(0, dtype=dtype))
+        g = init_variable('g', [n_state], initializer=tf.constant_initializer(1, dtype=dtype), hparams=hparams)
+        b = init_variable('b', [n_state], initializer=tf.constant_initializer(0, dtype=dtype), hparams=hparams)
         u = tf.reduce_mean(x, axis=axis, keepdims=True)
         s = tf.reduce_mean(tf.square(x-u), axis=axis, keepdims=True)
         x = (x - u) * tf.rsqrt(s + epsilon)
@@ -70,8 +75,8 @@ def conv1d(x, scope, nf, *, w_init_stdev=0.02, hparams=None):
     dtype = hparams.dtype if hparams else tf.float32
     with tf.variable_scope(scope, dtype=dtype):
         *start, nx = shape_list(x)
-        w = init_variable('w', [1, nx, nf], initializer=tf.random_normal_initializer(stddev=w_init_stdev, dtype=dtype))
-        b = init_variable('b', [nf], initializer=tf.constant_initializer(0, dtype=dtype))
+        w = init_variable('w', [1, nx, nf], initializer=tf.random_normal_initializer(stddev=w_init_stdev, dtype=dtype), hparams=hparams)
+        b = init_variable('b', [nf], initializer=tf.constant_initializer(0, dtype=dtype), hparams=hparams)
         c = tf.reshape(tf.matmul(tf.reshape(x, [-1, nx]), tf.reshape(w, [-1, nf]))+b, start+[nf])
         return c
 
@@ -191,9 +196,9 @@ def model(hparams, X, past=None, scope='model', reuse=tf.AUTO_REUSE, batch_size=
           batch, sequence = shape_list(X)
 
         wpe = init_variable('wpe', [hparams.n_ctx, hparams.n_embd],
-                             initializer=tf.random_normal_initializer(stddev=0.01, dtype=dtype))
+                             initializer=tf.random_normal_initializer(stddev=0.01, dtype=dtype), hparams=hparams)
         wte = init_variable('wte', [hparams.n_vocab, hparams.n_embd],
-                             initializer=tf.random_normal_initializer(stddev=0.02, dtype=dtype))
+                             initializer=tf.random_normal_initializer(stddev=0.02, dtype=dtype), hparams=hparams)
         past_length = 0 if past is None else tf.shape(past)[-2]
         h = tf.gather(wte, X) + tf.gather(wpe, positions_for(X, past_length))
         #h = tf.gather(wte, X) + tf.gather(wpe, positions_for(tf.zeros([batch, sequence]), past_length))

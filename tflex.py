@@ -339,6 +339,65 @@ class Saver(object):
             print('Failed to truncate %s' % fname)
         self.checkpoints = self.checkpoints[1:]
 
+
+# https://tensorflow.github.io/lingvo/_modules/lingvo/core/bfloat16_variables.html
+
+from tensorflow.python.training import saver as tf_saver
+
+
+class Bfloat16VariableSaveable(tf_saver.BaseSaverBuilder.SaveableObject):
+  """Saveable that loads Variables as bfloat16."""
+  def __init__(self, var, orig_dtype, slice_spec, name):
+    # TODO(rohananil): Investigate if we can avoid using a callable, instead
+    # change the saveable api to make use of dtype passed in.
+    def _make_callable_var():
+      return var
+    spec = tf_saver.BaseSaverBuilder.SaveSpec(
+        _make_callable_var,
+        slice_spec,
+        name,
+        dtype=orig_dtype,
+        device=var.device)
+    super().__init__(var, [spec], name)
+  def restore(self, restored_tensors, restored_shapes):
+      restored_tensor = restored_tensors[0]
+      if restored_shapes is not None:
+        restored_tensor = tf.reshape(restored_tensor, restored_shapes[0])
+      return tf.assign(
+          self.op,
+          tf.cast(restored_tensor, tf.bfloat16),
+          validate_shape=restored_shapes is None and
+          self.op.get_shape().is_fully_defined())
+
+
+def get_saver_spec_for_variables_with_bf16_overrides(variables_to_restore):
+  """Returns a dictionary containing overrides to load variables as bf16.
+
+  Args:
+    variables_to_restore: A mapping from variable to name (on checkpoint) to the
+      Variable object.
+
+  Returns:
+    A saver dictionary which can be used to load from checkpoints.
+  """
+  saver_dict = {}
+  for var_name, v in variables_to_restore.items():
+    if v.dtype == tf.bfloat16:
+      # TODO(rohananil): Add support for PartitionedVariables if there is
+      # demand.
+      savable = Bfloat16VariableSaveable(v, tf.float32, '', var_name)
+      saver_dict[var_name] = savable
+    else:
+      saver_dict[var_name] = v
+  return saver_dict
+
+
+def get_bf16_var_list(var_list):
+  if isinstance(var_list, list):
+    var_list = dict([(x.name.split(':')[0], x) for x in var_list])
+  return get_saver_spec_for_variables_with_bf16_overrides(var_list)
+
+
 class Commands(object):
   def __init__(self, path='commands'):
     self.path = path
