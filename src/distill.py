@@ -21,6 +21,10 @@ from pprint import pprint as pp
 
 import nflex as nf
 
+from functools import partial
+
+from tensorflow.contrib.tpu.python.tpu import tpu_function
+
 
 def read_prompt(prompt):
   if os.path.isfile(prompt):
@@ -42,21 +46,29 @@ def read_tokens(enc, prompt):
 def distill_model(
     batch_size=1,
     model_name='117M',
-    distill_model_name='117M_half',
     restore_from=None,
+    distill_model_name='117M_half',
+    distill_restore_from=None,
     init_tpu=False,
     prompt="Hello, my name is",
     length=32,
+    #learning_rate=0.00002,
+    #learning_rate=1e-09,
+    learning_rate=4e-11,
+    optimizer='adam',
 ):
     enc = encoder.get_encoder(distill_model_name)
-    src_hparams = model.default_hparams(trainable=False, dtype=tf.bfloat16)
+    src_hparams = model.default_hparams(trainable=False, dtype=tf.bfloat16, scope='model')
     with open(os.path.join('models', model_name, 'hparams.json')) as f:
         src_hparams.override_from_dict(json.load(f))
-    dst_hparams = model.default_hparams(trainable=True)
+    dst_hparams = model.default_hparams(trainable=True, dtype=tf.bfloat16, scope='distill')
     with open(os.path.join('models', distill_model_name, 'hparams.json')) as f:
         dst_hparams.override_from_dict(json.load(f))
 
     with tflex.Session(graph=tf.Graph()) as sess:
+
+        if init_tpu:
+          sess.run(tf.compat.v1.tpu.initialize_system())
         
         context_IN = tf.placeholder(tf.int32, [batch_size, None], name='context_IN')
         context_IN_fixed = tf.placeholder(tf.int32, [batch_size, dst_hparams.n_ctx], name='context_IN_fixed')
@@ -69,17 +81,23 @@ def distill_model(
         
         if True:
           #saver = tflex.Saver(var_list=tf.local_variables())
-          saver = tflex.Saver(var_list=tflex.get_bf16_var_list([x for x in tf.local_variables() if x.name.startswith('model/')]))
+          src_var_list = [x for x in tf.local_variables() if x.name.startswith(src_hparams.scope+'/')]
+          src_saver = tflex.Saver(var_list=tflex.get_bf16_var_list(src_var_list))
           if restore_from is None:
             restore_from = 'gs://tpu-usc1/models/gpt-2/' + model_name
-          ckpt = tflex.latest_checkpoint(restore_from)
-          saver.restore(sess, ckpt)
+          src_ckpt = tflex.latest_checkpoint(restore_from)
+          src_saver.restore(sess, src_ckpt)
         else:
           sess.run([tf.global_variables_initializer(), tf.local_variables_initializer()])
 
-        if init_tpu:
-          sess.run(tf.compat.v1.tpu.initialize_system())
-
+        #dst_saver = tf.train.Saver(var_list=tflex.get_bf16_var_list([x for x in tf.trainable_variables() if x.name.startswith(dst_hparams.scope+'/')]))
+        dst_var_list = [x for x in tf.trainable_variables() if x.name.startswith(dst_hparams.scope+'/')]
+        dst_saver = tf.train.Saver(var_list=dst_var_list)
+        if distill_restore_from is None:
+          distill_restore_from = 'gs://tpu-usc1/runs/gpt-2/distill/' + distill_model_name
+        dst_ckpt = tflex.latest_checkpoint(distill_restore_from)
+        if dst_ckpt is not None:
+          dst_saver.restore(sess, dst_ckpt)
 
         tokens1 = [15496, 11, 616, 1438, 318, 10821, 2635, 13, 314,
             1101, 1719, 257, 2151, 379, 262, 7541, 13, 314, 1101, 407,
@@ -131,8 +149,8 @@ def distill_model(
         start = len(enc.encode(prompt)) - 1
         assert start >= 0
         assert length > 0 and length <= src_hparams.n_ctx
-        i = tf.Variable(start, dtype=tf.int32, collections=['local_variables'])
-        length_var = tf.Variable(length, dtype=tf.int32, collections=['local_variables'])
+        i = tf.Variable(start, dtype=tf.int32, collections=['local_variables'], trainable=False)
+        length_var = tf.Variable(length, dtype=tf.int32, collections=['local_variables'], trainable=False)
         sess.run([x.initializer for x in [i, length_var]])
 
         def cond(i, *args):
@@ -179,9 +197,9 @@ def distill_model(
 
 
 
-        def samp(i):
+        def samp(i, hparams=src_hparams):
           #_, result = tf.while_loop(cond=cond, body=body, loop_vars=[i, tf.transpose(context_IN_fixed, [1, 0])], back_prop=False)
-          _, result = tf.while_loop(cond=cond, body=body, loop_vars=[i, context_IN_fixed], back_prop=False)
+          _, result = tf.while_loop(cond=cond, body=partial(body, hparams=hparams), loop_vars=[i, context_IN_fixed], back_prop=False)
           return [result]
           
 
@@ -203,7 +221,7 @@ def distill_model(
           logits = lm_output['logits']
           presents = lm_output['present']
           past_shape = model.past_shape(hparams=hparams, batch_size=batch_size, sequence=hparams.n_ctx)
-          _, result, past = tf.while_loop(cond=cond, body=body2, loop_vars=[i, context, presents], shape_invariants=[tf.TensorShape([]), tf.TensorShape([batch_size, hparams.n_ctx]), tf.TensorShape(past_shape)], back_prop=False)
+          _, result, past = tf.while_loop(cond=cond, body=partial(body2, hparams=hparams), loop_vars=[i, context, presents], shape_invariants=[tf.TensorShape([]), tf.TensorShape([batch_size, hparams.n_ctx]), tf.TensorShape(past_shape)], back_prop=False)
           return [result]
 
         #import pdb; pdb.set_trace()
@@ -238,6 +256,210 @@ def distill_model(
         #import pdb; pdb.set_trace()
 
         qq=sess.run(res, feed(prompt)); pp([pp(enc.decode(x)) for x in qq[0][:, 0:length_var.eval()]])
+
+        
+        def distill(context):
+          assert dst_hparams.n_ctx == src_hparams.n_ctx
+          dst_output = out(context, dst_hparams)
+          src_output = out(context, src_hparams)
+          src_mask = tf.where(tf.range(src_hparams.n_ctx, dtype=tf.int32) < length_var, tf.ones([src_hparams.n_ctx]), tf.zeros([src_hparams.n_ctx]))
+          dst_mask = tf.where(tf.range(dst_hparams.n_ctx, dtype=tf.int32) < length_var, tf.ones([dst_hparams.n_ctx]), tf.zeros([dst_hparams.n_ctx]))
+          src_mask = tf.reshape(src_mask, [1,-1,1])
+          dst_mask = tf.reshape(dst_mask, [1,-1,1])
+          src_logits = src_output['logits'] * src_mask
+          src_logits = tf.stop_gradient(src_logits)
+          dst_mask = tf.stop_gradient(dst_mask)
+          dst_logits = dst_output['logits'] * dst_mask
+          mse = tf.squared_difference(src_logits, dst_logits)
+          #loss = tf.reduce_mean(mse, axis=[1, 2])
+          #loss = tf.reduce_mean(tf.reduce_sum(mse, axis=[1]), axis=[1])
+          loss = tf.reduce_sum(mse, axis=[1]) # [batch, n_vocab]
+          loss = tf.reduce_mean(loss, axis=[0]) # [n_vocab]
+          loss = tf.reduce_mean(loss, axis=[0]) # []
+          return loss
+
+
+        def valid_loss(context, hparams):
+          output = out(context, hparams)
+          logits = output['logits']
+          loss = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=context[:, 1:], logits=logits[:, :-1])
+          return loss
+
+
+        def kl_div_log_target(input, target):
+          output = tf.exp(target) * (target - input)
+          return output
+
+        def kl_div_non_log_target(input, target):
+          output_pos = target * (tf.log(target) - input)
+          zeros = tf.zeros_like(output_pos)
+          output = tf.where(target > 0, output_pos, zeros)
+          return output
+
+        def kl_div_1(input, target, log_target=False):
+          if log_target:
+            return kl_div_log_target(input=input, target=target)
+          else:
+            return kl_div_non_log_target(input=input, target=target)
+
+        def kl_div(input, target, reduction='sum', log_target=False):
+          assert reduction in ['batchmean', 'sum']
+          output = kl_div_1(input=input, target=target, log_target=log_target)
+          reduced = tf.reduce_sum(output, axis=[0])
+          if reduction == 'batchmean':
+            reduced = reduced / reduced.shape[0].value
+          return reduced
+
+        def distill_loss(context, temperature=None, alpha_ce=0.5, alpha_clm=0.5):
+          assert dst_hparams.n_ctx == src_hparams.n_ctx
+          if temperature is None:
+            temperature = model.init_variable('temperature', shape=(), initializer=tf.constant_initializer(1.0, dtype=tf.float32), trainable=False)
+          dst_output = out(context, dst_hparams)
+          src_output = out(context, src_hparams)
+          #src_n = src_hparams.n_ctx
+          #dst_n = dst_hparams.n_ctx
+          src_n = tf.shape(context)[-1]
+          dst_n = src_n
+          src_mask = tf.where(tf.range(src_n, dtype=tf.int32) < length_var, tf.ones([src_n]), tf.zeros([src_n]))
+          dst_mask = tf.where(tf.range(dst_n, dtype=tf.int32) < length_var, tf.ones([dst_n]), tf.zeros([dst_n]))
+          src_mask = tf.reshape(src_mask, [1,-1,1])
+          dst_mask = tf.reshape(dst_mask, [1,-1,1])
+          src_logits = src_output['logits'] * src_mask
+          src_logits = tf.stop_gradient(src_logits)
+          dst_mask = tf.stop_gradient(dst_mask)
+          dst_logits = dst_output['logits'] * dst_mask
+          input = tf.nn.log_softmax(dst_logits / temperature, axis=-1)
+          #target = tf.nn.softmax(src_logits / temperature, axis=-1)
+          #loss_ce = kl_div(input=input, target=target)
+          target = tf.nn.log_softmax(src_logits / temperature, axis=-1)
+          loss_ce = kl_div_1(input=input, target=target, log_target=True)
+          loss_ce = loss_ce * (temperature) ** 2
+          alpha_ce = alpha_ce + alpha_clm # TODO
+          loss = alpha_ce * loss_ce
+          if alpha_clm > 0.0:
+            # TODO
+            pass
+          #loss = tf.reduce_mean(loss, axis=-1) # mean across batch
+          # loss is [batch, ?, 50257]
+          loss = tf.reduce_sum(loss, axis=-1)
+          # loss is [batch, ?]
+          return loss
+
+        def distill_train(context, loss_fn=distill_loss):
+          with tf.variable_scope('', reuse=tf.AUTO_REUSE, use_resource=True):
+            loss = loss_fn(context)
+            #loss = tf.reduce_mean(loss)
+            gs = tf.train.get_or_create_global_step()
+            lr = model.init_variable('learning_rate', shape=(), initializer=tf.constant_initializer(learning_rate, dtype=tf.float32), trainable=False)
+            beta1 = model.init_variable('beta1_power', shape=(), initializer=tf.constant_initializer(0.9, dtype=tf.float32), trainable=False)
+            beta2 = model.init_variable('beta2_power', shape=(), initializer=tf.constant_initializer(0.999, dtype=tf.float32), trainable=False)
+            opt = tf.train.AdamOptimizer(lr, beta1=beta1, beta2=beta2)
+            opt = tf.contrib.tpu.CrossShardOptimizer(opt)
+            all_vars = [v for v in tf.trainable_variables() if dst_hparams.scope in v.name]
+            train_vars = all_vars
+            grads = tf.gradients(loss, train_vars)
+            opt_grads = list(zip(grads, train_vars))
+            opt_apply = opt.apply_gradients(opt_grads, global_step=gs)
+            with tf.control_dependencies([opt_apply]):
+              return [tf.identity(loss, name='distill_train_op')]
+
+        
+          
+        import pdb; pdb.set_trace()
+
+        #lr = model.init_variable('learning_rate', shape=(), initializer=tf.constant_initializer(learning_rate, dtype=tf.float32), trainable=False)
+        #gs = tf.train.get_or_create_global_step()
+
+        context_IN_train = tf.placeholder(tf.int32, [8, batch_size, dst_hparams.n_ctx], name='context_IN_train')
+        train2 = tf.tpu.shard(lambda x: distill_train(x[0]), num_shards=8, inputs=[context_IN_train]); train2
+
+        context_INs = tf.placeholder(tf.int32, [8, batch_size, None], name='context_INs')
+        train3 = tf.tpu.shard(lambda x: distill_train(x[0], loss_fn=distill_loss), num_shards=8, inputs=[context_INs]); train3
+
+        iters = model.init_variable('iterations', shape=(), initializer=tf.constant_initializer(4, dtype=tf.int32), trainable=False, dtype=tf.int32)
+
+
+        @tpu_function.on_device_training_loop
+        def train_loop(x):
+          def train_step(loss):
+            del loss
+            print('x'); pp(x)
+            op = distill_train(x, loss_fn=distill_loss)
+            print('op'); pp(op)
+            #with tf.control_dependencies(op):
+            #  return tf.constant(0.0, dtype=tf.float32)
+            return tf.reduce_sum(op, axis=-1)
+          #print('train_step'); pp(train_step)
+          #print('train_step_1'); pp(train_step(1e7))
+          #print('train_step_2'); pp(train_step([1e7]))
+          op = tf.contrib.tpu.repeat(iters, train_step, [[[1e7] * x.shape[0].value]])
+          print('op_final'); pp(op)
+          #op = tf.constant(0.0, dtype=tf.float32)
+          #return op
+          with tf.control_dependencies(op):
+            loss = distill_train(x, loss_fn=distill_loss)
+            #return [loss]
+            return loss
+
+            
+        train4 = tf.tpu.shard(lambda x: train_loop(x[0]), num_shards=8, inputs=[context_INs]); train4
+
+        all_vars = [v for v in tf.trainable_variables() if dst_hparams.scope in v.name]
+        train_vars = all_vars
+        adam_vars = [x for x in tf.get_collection('variables') if '/Adam' in x.name or 'beta1_power' in x.name or 'beta2_power' in x.name]
+        gs = tf.train.get_or_create_global_step()
+        lr = model.get_variable('learning_rate', tf.local_variables())
+        beta1 = model.get_variable('beta1_power', tf.local_variables())
+        beta2 = model.get_variable('beta2_power', tf.local_variables())
+        temp = model.get_variable('temperature', tf.local_variables())
+        other_vars = [gs, lr, beta1, beta2, temp, iters]
+
+        #import pdb; pdb.set_trace()
+        #train2 = tf.tpu.shard(distill_train, num_shards=8, inputs=tf.unstack(context_IN_train)); train2
+        #train2 = tf.tpu.shard(lambda x: distill_train(x[0]), num_shards=8, inputs=[context_IN_train]); train2
+
+        import pdb; pdb.set_trace()
+
+        sess.run([x.initializer for x in tf.global_variables() if x.name.startswith('beta1') or x.name.startswith('beta2')])
+
+        #sess.run([x.initializer for x in adam_vars + all_vars + other_vars])
+        sess.run([x.initializer for x in adam_vars + other_vars])
+        #sess.run([x.initializer for x in adam_vars])
+
+        length_var.load(6)
+        gs.load(264)
+        lr.load(4e-11)
+        i.load(3)
+        iters.load(320)
+        gs.load(9971)
+        lr.load(8e-11)
+        gs.load(14144)
+        lr.load(1.6e-10)
+
+        dst_val_loss = valid_loss(context_IN, dst_hparams)
+        src_val_loss = valid_loss(context_IN, src_hparams)
+        chk = tf.tpu.shard(lambda: samp(i, hparams=dst_hparams), num_shards=8, output_shard_axes=[0])
+
+        import pdb; pdb.set_trace()
+
+        #pp(sess.run(train3, {context_IN_train: np.transpose(qq, [1,0,2]), context_INs: np.transpose(qq, [1,0,2])[:,:,0:length_var.eval()]})[0]); qq2=sess.run(chk, feed(prompt)); pp([pp(enc.decode(x)) for x in qq2[0][:, 0:length_var.eval()]]); zz=sess.run(dst_val_loss, feed(prompt)); pp(zz); pp(np.sum(zz))
+
+        #pp(sess.run(train3, {context_IN_train: np.transpose(qq, [1,0,2]), context_INs: np.transpose(qq, [1,0,2])[:,:,0:length_var.eval()]})[0]); qq2=sess.run(chk, feed(prompt)); pp([pp(enc.decode(x)) for x in qq2[0][:, 0:length_var.eval()]])
+
+        sess.run(train3, {context_IN_train: np.transpose(qq, [1,0,2]), context_INs: np.transpose(qq, [1,0,2])[:,:,0:6]})
+        #sess.run(train2, {context_IN_train: np.transpose(qq, [1,0,2])})
+
+        import pdb; pdb.set_trace()
+
+        saving = tf.train.Saver(var_list=tf.trainable_variables())
+        #saving.save(sess, 'gs://tpu-usc1/runs/gpt-2/distill/' + distill_model_name + '/model.ckpt')
+
+        import pdb; pdb.set_trace()
+
+        qq2=sess.run(chk, feed(prompt)); pp([pp(enc.decode(x)) for x in qq2[0][:, 0:length_var.eval()]])
+
+        # sess.run(train2, {context_IN_train: np.transpose(qq, [1,0,2])}); qq2=sess.run(chk, feed(prompt)); pp([pp(enc.decode(x)) for x in qq2[0][:, 0:length_var.eval()+1]]); qq3=sess.run(res, feed(prompt)); pp([pp(enc.decode(x)) for x in qq3[0][:, 0:length_var.eval()+1]]);
+
         import pdb; pdb.set_trace()
 
         raw_text = read_prompt(prompt)
