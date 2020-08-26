@@ -2,7 +2,7 @@ import numpy as np
 import tensorflow as tf
 from tensorflow.contrib.training import HParams
 
-def default_hparams(trainable=True, dtype=tf.float32):
+def default_hparams(trainable=True, dtype=tf.float32, scope='model'):
     return HParams(
         n_vocab=50257,
         n_ctx=1024,
@@ -13,6 +13,7 @@ def default_hparams(trainable=True, dtype=tf.float32):
         attn_dropout=0.0,
         dtype=dtype,
         trainable=trainable,
+        scope=scope,
     )
 
 import os
@@ -24,15 +25,17 @@ def get_variable(name, variables=None):
         if x.name.startswith(name + ':'):
             return x
 
-def init_variable(name, shape, initializer, hparams):
-  vs = tf.trainable_variables() if hparams.trainable else tf.local_variables()
+def init_variable(name, shape, initializer, hparams=None, trainable=None, dtype=None):
+  if trainable is None:
+    trainable = hparams.trainable
+  vs = tf.trainable_variables() if trainable else tf.local_variables()
   v = get_variable(name, vs)
   if v is not None:
     return v
-  if hparams.trainable:
-    return tf.get_variable(name, shape, initializer=initializer, use_resource=True)
+  if trainable:
+    return tf.get_variable(name, shape, initializer=initializer, use_resource=True, dtype=dtype)
   else:
-    return tf.get_local_variable(name, shape, initializer=initializer, use_resource=True)
+    return tf.get_local_variable(name, shape, initializer=initializer, use_resource=True, dtype=dtype)
 
 def shape_list(x):
     """Deal with dynamic shape in tensorflow cleanly."""
@@ -144,8 +147,9 @@ def mlp(x, scope, n_state, *, hparams):
     dtype = hparams.dtype if hparams else tf.float32
     with tf.variable_scope(scope, dtype=dtype):
         nx = x.shape[-1].value
-        h = gelu(conv1d(x, 'c_fc', n_state, hparams=hparams))
-        h2 = conv1d(h, 'c_proj', nx, hparams=hparams)
+        h0 = conv1d(x, 'c_fc', n_state, hparams=hparams)
+        h1 = gelu(h0)
+        h2 = conv1d(h1, 'c_proj', nx, hparams=hparams)
         h2 = dropout(h2, hparams.res_dropout)
         return h2
 
@@ -186,7 +190,8 @@ def window_for(length, nsteps, past_length=0):
     return past_length + tf.add_n(tf.meshgrid(tf.range(0, nsteps), tf.range(0, length)))
 
 
-def model(hparams, X, past=None, scope='model', reuse=tf.AUTO_REUSE, batch_size=None, sequence=None):
+def model(hparams, X, past=None, scope=None, reuse=tf.AUTO_REUSE, batch_size=None, sequence=None):
+    scope = scope if scope is not None else hparams.scope
     dtype = hparams.dtype if hparams else tf.float32
     with tf.variable_scope(scope, reuse=reuse, dtype=dtype):
         results = {}
@@ -205,14 +210,16 @@ def model(hparams, X, past=None, scope='model', reuse=tf.AUTO_REUSE, batch_size=
 
         # Transformer
         presents = []
+        layers = []
         pasts = tf.unstack(past, axis=1) if past is not None else [None] * hparams.n_layer
         assert len(pasts) == hparams.n_layer
         for layer, past in enumerate(pasts):
             h, present = block(h, 'h%d' % layer, past=past, hparams=hparams)
-            if layer == 10:
-                tf.add_to_collection('checkpoints', h)
             presents.append(present)
+            layers.append(h)
+            #import pdb; pdb.set_trace()
         results['present'] = tf.stack(presents, axis=1)
+        results['layers'] = layers
         h = norm(h, 'ln_f', hparams=hparams)
 
         # Language model loss.  Do tokens <n predict token n?

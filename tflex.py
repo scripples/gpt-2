@@ -124,15 +124,26 @@ class Session(tf.Session):
     self.config = config
     self._tflex_cached_devices = self.list_devices()
     pp(self._tflex_cached_devices)
+    self._serial_number = None
 
   def run(self, *args, **kws):
+    if self._serial_number is None:
+      self._serial_number = 'Session' if self.target is None else get_tpu_serial_number(session=self)
     now = time.time()
     device = get_current_device(self)
-    print('Session.run device=%s %s %s' % (repr(device), pretty_obj(args), pretty_obj(kws)))
+    print('%s.run device=%s %s %s' % (self._serial_number, repr(device), pretty_obj(args), pretty_obj(kws)))
     result = super(Session, self).run(*args, **kws)
     elapsed = time.time() - now
-    print('Session.run device=%s finished in %.2fsec: %s %s' % (repr(device), elapsed, pretty_obj(args), pretty_obj(kws)))
+    print('%s.run device=%s finished in %.2fsec: %s %s' % (self._serial_number, repr(device), elapsed, pretty_obj(args), pretty_obj(kws)))
     return result
+
+from tensorflow.python.framework import ops as tf_ops
+
+def set_default_session(sess):
+  assert len(tf_ops._default_session_stack.stack) == 1
+  old_sess = tf_ops._default_session_stack.stack[0]
+  tf_ops._default_session_stack.stack[0] = sess
+  return old_sess
 
 def split_by_params(vs, n=200e6, f=None):
   if f is None:
@@ -396,6 +407,83 @@ def get_bf16_var_list(var_list):
   if isinstance(var_list, list):
     var_list = dict([(x.name.split(':')[0], x) for x in var_list])
   return get_saver_spec_for_variables_with_bf16_overrides(var_list)
+
+
+class Float32VariableSaveable(tf_saver.BaseSaverBuilder.SaveableObject):
+  """Saveable that loads Variables as float32."""
+  def __init__(self, var, orig_dtype, slice_spec, name):
+    # TODO(rohananil): Investigate if we can avoid using a callable, instead
+    # change the saveable api to make use of dtype passed in.
+    def _make_callable_var():
+      return var
+    spec = tf_saver.BaseSaverBuilder.SaveSpec(
+        _make_callable_var,
+        slice_spec,
+        name,
+        dtype=orig_dtype,
+        device=var.device)
+    super().__init__(var, [spec], name)
+  def restore(self, restored_tensors, restored_shapes):
+      restored_tensor = restored_tensors[0]
+      if restored_shapes is not None:
+        restored_tensor = tf.reshape(restored_tensor, restored_shapes[0])
+      return tf.assign(
+          self.op,
+          tf.cast(restored_tensor, tf.float32),
+          validate_shape=restored_shapes is None and
+          self.op.get_shape().is_fully_defined())
+
+
+def get_saver_spec_for_variables_with_f32_overrides(variables_to_restore):
+  """Returns a dictionary containing overrides to load variables as f32.
+
+  Args:
+    variables_to_restore: A mapping from variable to name (on checkpoint) to the
+      Variable object.
+
+  Returns:
+    A saver dictionary which can be used to load from checkpoints.
+  """
+  saver_dict = {}
+  for var_name, v in variables_to_restore.items():
+    if v.dtype == tf.float32:
+      # TODO(rohananil): Add support for PartitionedVariables if there is
+      # demand.
+      savable = Float32VariableSaveable(v, tf.bfloat16, '', var_name)
+      saver_dict[var_name] = savable
+    else:
+      saver_dict[var_name] = v
+  return saver_dict
+
+
+def get_f32_var_list(var_list):
+  if isinstance(var_list, list):
+    var_list = dict([(x.name.split(':')[0], x) for x in var_list])
+  return get_saver_spec_for_variables_with_f32_overrides(var_list)
+
+
+# How to get a TPU's physical ID, aka a "serial number"
+
+from tensorflow.python.framework import errors_impl
+from tensorflow.contrib.memory_stats.ops import gen_memory_stats_ops
+
+def clone_session(session=None, graph=None, **kws):
+  if session is None:
+    session = tf.get_default_session()
+  if graph is None:
+    graph = session.graph
+  config = session._config # is there a better way to do this?
+  master = session.sess_str # is there a better way to do this?
+  return tf.Session(master, graph=graph, config=config)
+
+def get_tpu_serial_number(session=None):
+  if session is None:
+    session = tf.get_default_session()
+  try:
+    with tf.Graph().as_default() as graph, clone_session(graph=graph) as throwaway_session:
+      throwaway_session.run(gen_memory_stats_ops.bytes_in_use())
+  except errors_impl.NotFoundError as e:
+    return e.message.split(' in binary running on ')[-1].split('. ')[0]
 
 
 class Commands(object):
