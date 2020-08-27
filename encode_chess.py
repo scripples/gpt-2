@@ -109,17 +109,19 @@ def render_game(lines, show_moves=True):
 if __name__ == '__main__':
   import sys
   lines = []
-  for line in sys.stdin:
-    if len(lines) > 0 and len(line.strip()) == 0:
+  args = sys.argv[1:]
+  with open(args[0]) as infile:
+    for line in infile:
+      if len(lines) > 0 and len(line.strip()) == 0:
+        for oline in render_game(lines):
+          print(oline)
+        print('<|endoftext|>')
+        lines = []
+      else:
+        lines.append(line)
+    if len(lines) > 0:
       for oline in render_game(lines):
         print(oline)
-      print('<|endoftext|>')
-      lines = []
-    else:
-      lines.append(line)
-  if len(lines) > 0:
-    for oline in render_game(lines):
-      print(oline)
 
 
 
