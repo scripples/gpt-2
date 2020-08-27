@@ -188,9 +188,43 @@ class HighSpeedTokenizer(object):
     text = self.tokenizer.decode(tokens, False)
     return text
 
+class SpaceSeparatedTokenizer(object):
+  def __init__(self, vocab_path):
+    with open(vocab_path) as f:
+      self.encoder = json.load(f)
+      self.decoder = {v: k for k, v in self.encoder.items()}
+
+  def decode(self, tokens):
+    return ' '.join([self.decoder[token] for token in tokens]).replace(' \n ', '\n')
+    # sep = None
+    # lines = []
+    # line = []
+    # for token in tokens:
+    #   c = self.decoder[token]
+    #   if c == '\n':
+    #     lines.append(' '.join(line) + '\n')
+    #     line = []
+    #   else:
+    #     line.append(c)
+    # return ''.join(lines) + ' '.join(line)
+
+  def encode(self, text):
+    tokens = []
+    for line in text.splitlines():
+      for word in line.split():
+        tokens.append(self.encoder[word])
+      if '\n' in self.encoder:
+        tokens.append(self.encoder['\n'])
+    if len(tokens) > 0 and '\n' in self.encoder:
+      if tokens[-1] == self.encoder['\n'] and not text.endswith('\n'):
+        tokens.pop()
+    return tokens
+
 def get_encoder(model_name):
     vocab_path = os.path.join('models', model_name, 'encoder.json')
     bpe_merges_path = os.path.join('models', model_name, 'vocab.bpe')
+    if not os.path.isfile(bpe_merges_path) and os.path.isfile(vocab_path):
+      return SpaceSeparatedTokenizer(vocab_path)
     if use_high_speed_tokenizer:
       return HighSpeedTokenizer(vocab_path=vocab_path, bpe_merges_path=bpe_merges_path)
     with open(vocab_path, 'r') as f:
