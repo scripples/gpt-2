@@ -1,3 +1,4 @@
+import json
 import glob
 import numpy as np
 import os
@@ -264,11 +265,13 @@ class TokenSampler(object):
     else:
       return self.sample_unsafe(length=length, max_attempts=max_attempts)
 
+
 class TokenStreamer(object):
-  def __init__(self, fp, enc, use_locking=False):
+  def __init__(self, fp, enc, use_locking=False, end_of_text_token=None):
     self.fp = fp
     self.enc = enc
     self.lock = threading.Lock() if use_locking else None
+    self.eot = end_of_text_token if end_of_text_token is not None else self.enc.encoder['<|endoftext|>']
 
   def stream(self, step=128*1024, verbose=True, **kws):
     try:
@@ -276,14 +279,30 @@ class TokenStreamer(object):
         self.lock.acquire()
       start = time.time()
       total = 0
-      for i, line in tflex_utils.for_each_line(self.fp, verbose=verbose, **kws):
-        #import pdb; pdb.set_trace()
-        tokens = self.enc.encode(line) if isinstance(line, str) else line
-        yield tokens
-        total += len(tokens)
-        if i % step == 0 and verbose:
-          elapsed = time.time() - start
-          sys.stderr.write('%d tokens in %.4fs (%.4f tokens/sec)\n' % (total, elapsed, total/elapsed))
+      report_time = time.time() + 5.0
+      if isinstance(self.fp, str) and self.fp.endswith('.json'):
+        # TODO: combine both of these branches.
+        with open(self.fp) as f:
+          documents = json.load(f)
+        for document in tqdm.tqdm(documents) if verbose else documents:
+          tokens = self.enc.encode(document) + [self.eot]
+          yield tokens
+          total += len(tokens)
+          if verbose and time.time() >= report_time:
+            report_time = time.time() + 5.0
+            elapsed = time.time() - start
+            sys.stderr.write('\n\n%d tokens in %.4fs (%.4f tokens/sec)\n\n' % (total, elapsed, total/elapsed))
+      else:
+        for i, line in tflex_utils.for_each_line(self.fp, verbose=verbose, **kws):
+          #import pdb; pdb.set_trace()
+          tokens = self.enc.encode(line) if isinstance(line, str) else line
+          yield tokens
+          total += len(tokens)
+          if verbose and time.time() >= report_time:
+            report_time = time.time() + 5.0
+            elapsed = time.time() - start
+            sys.stderr.write('\n\n%d tokens in %.4fs (%.4f tokens/sec)\n\n' % (total, elapsed, total/elapsed))
     finally:
       if self.lock:
         self.lock.release()
+
