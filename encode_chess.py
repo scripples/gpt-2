@@ -32,7 +32,7 @@ def diff_board(b1, b2):
   #   return move.uci()
 
 
-def annotate_pieces(b):
+def annotate_pieces(board):
   annotated = []
   for y, rank in enumerate(str(board).splitlines()):
     for x, piece in enumerate(rank.split()):
