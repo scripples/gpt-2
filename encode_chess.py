@@ -8,7 +8,7 @@ def next_board(b, move):
   return b
 
 
-@ring.lru
+@ring.lru(maxsize=1000)
 def epd_board(x):
   epd = x.split(' ', 1)[1]
   return chess.Board(epd)
