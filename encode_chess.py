@@ -18,8 +18,6 @@ def as_board(x):
 
 
 def diff_board(b1, b2):
-  b1 = as_board(b1)
-  b2 = as_board(b2)
   for move in list(b1.legal_moves):
     b1.push(move)
     try:
@@ -35,7 +33,6 @@ def diff_board(b1, b2):
 
 
 def annotate_pieces(b):
-  board = as_board(b)
   annotated = []
   for y, rank in enumerate(str(board).splitlines()):
     for x, piece in enumerate(rank.split()):
@@ -87,6 +84,7 @@ def render_board(b, b2=None, show_moves=True):
     raise NotImplementedError()
     #return state + pieces + ' !\n'
   else:
+    board2 = as_board(b2)
     #result = [state]
     result = []
     result += [won]
@@ -99,7 +97,7 @@ def render_board(b, b2=None, show_moves=True):
     if show_moves:
       result += ['? ' + render_uci(coords, uci) for uci in sorted([move.uci() for move in list(board.legal_moves)])]
     result += [':']
-    next_move_uci = diff_board(b, b2)
+    next_move_uci = diff_board(board, board2)
     assert next_move_uci is not None
     result += [render_uci(coords, next_move_uci)]
     return ' '.join(result)
