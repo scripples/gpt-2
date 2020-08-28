@@ -1,4 +1,6 @@
 import chess
+import ring
+
 
 def next_board(b, move):
   b = b.copy()
@@ -6,10 +8,15 @@ def next_board(b, move):
   return b
 
 
+@ring.lru
+def epd_board(x):
+  epd = x.split(' ', 1)[1]
+  return chess.Board(epd)
+
+
 def as_board(x):
   if isinstance(x, str):
-    epd = x.split(' ', 1)[1]
-    return chess.Board(epd)
+    return epd_board(x)
   assert isinstance(x, chess.Board)
   return x
 
