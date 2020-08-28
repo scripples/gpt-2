@@ -9,14 +9,10 @@ def next_board(b, move):
 
 
 @ring.lru(maxsize=1000)
-def epd_board(x):
-  epd = x.split(' ', 1)[1]
-  return chess.Board(epd)
-
-
 def as_board(x):
   if isinstance(x, str):
-    return epd_board(x)
+    epd = x.split(' ', 1)[1]
+    return chess.Board(epd)
   assert isinstance(x, chess.Board)
   return x
 
