@@ -1,6 +1,5 @@
 import chess
 
-
 def next_board(b, move):
   b = b.copy()
   b.push(move)
@@ -128,10 +127,11 @@ def render_game(lines, show_moves=True):
 
 if __name__ == '__main__':
   import sys
+  import tflex_utils
   lines = []
   args = sys.argv[1:]
   with open(args[0]) as infile:
-    for line in infile:
+    for line in tflex_utils.for_each_line(infile):
       if len(lines) > 0 and len(line.strip()) == 0:
         for oline in render_game(lines):
           print(oline)
