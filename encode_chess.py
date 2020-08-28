@@ -133,9 +133,13 @@ if __name__ == '__main__':
   with open(args[0]) as infile:
     for i, line in tflex_utils.for_each_line(infile):
       if len(lines) > 0 and len(line.strip()) == 0:
-        for oline in render_game(lines):
-          print(oline)
-        print('<|endoftext|>')
+        try:
+          for oline in render_game(lines):
+            print(oline)
+          print('<|endoftext|>')
+        except:
+          import traceback
+          traceback.print_exc()
         lines = []
       else:
         lines.append(line)
