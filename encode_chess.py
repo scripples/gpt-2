@@ -131,7 +131,7 @@ if __name__ == '__main__':
   lines = []
   args = sys.argv[1:]
   with open(args[0]) as infile:
-    for line in tflex_utils.for_each_line(infile):
+    for i, line in tflex_utils.for_each_line(infile):
       if len(lines) > 0 and len(line.strip()) == 0:
         for oline in render_game(lines):
           print(oline)
