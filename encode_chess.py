@@ -52,6 +52,12 @@ def spc(x):
 
 
 def render_board(b, b2=None, show_moves=True):
+  assert isinstance(b, str)
+  won = b.split(' ', 1)[0]
+  if won == '1/2-1/2': won = '1 1'
+  elif won == '1-0': won = '1 0'
+  elif won == '0-1': won = '0 1'
+  else: raise ValueError("Unknown won state: %s" % won)
   board = as_board(b)
   state = board.epd().split(' ', 1)[1]
   side, castling, en_passant, *operations = state.split(' ')
@@ -68,7 +74,9 @@ def render_board(b, b2=None, show_moves=True):
     #return state + pieces + ' !\n'
   else:
     #result = [state]
-    result = [side]
+    result = []
+    result += [won]
+    result += [side]
     result += castling
     result += [en_passant]
     result += ['<']
