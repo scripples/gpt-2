@@ -34,11 +34,11 @@ def annotate_pieces(b):
 
 
 def annotate_uci(coords, uci):
-  assert len(uci) == 4
-  x0, y0, x1, y1 = uci
+  assert len(uci) in [4, 5]
+  x0, y0, x1, y1, *promote = uci
   src = x0+y0
   dst = x1+y1
-  return [src, coords[src], dst, coords[dst]]
+  return [src, coords[src], dst, coords[dst]] + promote
 
 
 def render_uci(coords, uci):
