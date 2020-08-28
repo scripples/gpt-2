@@ -1,6 +1,10 @@
 import chess
 
-def next_board(b, san): b = b.copy(); b.push_san(san); return b
+
+def next_board(b, move):
+  b = b.copy()
+  b.push(move)
+  return b
 
 
 def as_board(x):
@@ -14,11 +18,19 @@ def as_board(x):
 def diff_board(b1, b2):
   b1 = as_board(b1)
   b2 = as_board(b2)
-  result = [move for move in list(b1.legal_moves) if next_board(b1, b1.san(move)).epd() == b2.epd()]
-  if len(result) > 0:
-    assert len(result) == 1
-    move = result[0]
-    return move.uci()
+  for move in list(b1.legal_moves):
+    b1.push(move)
+    try:
+      if b1.epd() == b2.epd():
+        return move.uci()
+    finally:
+      b1.pop()
+  # result = [move for move in b1.legal_moves if next_board(b1, move) == b2]
+  # if len(result) > 0:
+  #   assert len(result) == 1
+  #   move = result[0]
+  #   return move.uci()
+
 
 def annotate_pieces(b):
   board = as_board(b)
