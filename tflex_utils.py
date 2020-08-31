@@ -146,7 +146,11 @@ def tokens_to_file(out, chunks, stride):
   else:
     assert stride in [2, 4]
     tokens = np.array(chunks, dtype=np.uint16 if stride == 2 else np.int32)
-    tokens.tofile(out)
+    if out == sys.stdout.buffer:
+      bs = tokens_to_buffer(chunks, stride)
+      out.write(bs)
+    else:
+      tokens.tofile(out)
 
 def tokens_from_file(f, stride):
   if isinstance(f, gfile.GFile):
