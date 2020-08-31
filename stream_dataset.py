@@ -23,7 +23,8 @@ parser = argparse.ArgumentParser(
 parser.add_argument('--model_name', metavar='MODEL', type=str, default='117M', help='Pretrained model name')
 parser.add_argument('--combine', metavar='chars', type=int, default=50000, help='concatenate files with <|endoftext|> separator into chunks of this minimum size')
 parser.add_argument('--append', action='store_true', help='append to the output file?')
-parser.add_argument('--reopen_every', type=float, default=1.0, help='Reopen output file every N seconds')
+parser.add_argument('--reopen_every', type=float, default=None, help='Reopen output file every N seconds')
+parser.add_argument('--stride', type=int, default=None, help='4 for int32 (.tok32), 2 for uint16 (.tok16)')
 parser.add_argument('in_npz', metavar='IN.npz', type=str, help='Input file path')
 parser.add_argument('out_tok', metavar='OUT.tok', type=str, default='-', nargs='?', help='Output file path')
 
@@ -42,13 +43,22 @@ def main():
     output_text_mode = args.out_tok == '-' 
     total_size = sum([len(x) for x in chunks]) if not text_mode else 0
     if not output_text_mode:
-      assert args.out_tok.endswith('.tok16') or args.out_tok.endswith('.tok32')
-    half = args.out_tok.endswith('.tok16')
-    stride = (2 if half else 4)
+      assert args.out_tok.endswith('.tok16') or args.out_tok.endswith('.tok32') or args.out_tok == '/dev/stdout'
+    if args.stride is not None:
+      stride = args.stride
+    else:
+      stride = (4 if args.out_tok.endswith('.tok32') else 2)
     desc = ("Required filesize: %.2f MB (%d bytes)" % (stride * total_size / 1024 / 1024, stride * total_size)) if not text_mode else None
     reopen_time = time.time()
+    def open_stdout(o, mode):
+      if o == '-':
+        return nullcontext()
+      if o == '/dev/stdout':
+        return sys.stdout.buffer
+      return tflex_utils.try_open(o, mode)
+
     with (tqdm.tqdm(ncols=100, desc=desc, total=total_size, unit_scale=True) if not text_mode else nullcontext()) as pbar:
-      with (nullcontext() if args.out_tok == '-' else tflex_utils.try_open(args.out_tok, "ab" if args.append else "wb")) as f:
+      with open_stdout(args.out_tok, "ab" if args.append else "wb") as f:
         i = 0
         for chunk in streamer.stream():
           #import pdb; pdb.set_trace()
@@ -56,7 +66,7 @@ def main():
             if f is not None:
               f.flush()
           if f is not None:
-            if time.time() - reopen_time > args.reopen_every:
+            if args.reopen_every is not None and time.time() - reopen_time > args.reopen_every:
               f.close()
               f = tflex_utils.ensure_open(args.out_tok, "ab")
               reopen_time = time.time()
